@@ -18,6 +18,8 @@ if TYPE_CHECKING:
     # avoid circuit import
     from vllm.lora.layers import LoRAMapping
 
+from vllm.logger import init_logger
+logger = init_logger(__name__)
 
 class PunicaWrapperABC(ABC):
     """
@@ -199,6 +201,9 @@ class PunicaWrapperBase(PunicaWrapperABC):
     def _update_prefill_metadata(self,
                                  token_lora_tensor: torch.Tensor) -> None:
 
+        import traceback
+        stack = traceback.format_stack()
+        logger.info("_update_prefill_metadata called from:\n" + "".join(stack))
         (b_seq_start_tensor, seq_length_tensor, lora_indices_tensor,
          batch_size, max_length, token_nums,
          no_lora) = compute_meta(token_lora_tensor)
@@ -260,6 +265,9 @@ class PunicaWrapperBase(PunicaWrapperABC):
             5. max_length: The maximum sequence length in the batch.
             6. token_nums: The token numbers in the batch.
         """
+        import traceback
+        stack = traceback.format_stack()
+        logger.info("prefill_metadata called from:\n" + "".join(stack))
         return (self._seq_start_locs[:self.batch_size],
                 self._seq_lengths[:self.batch_size],
                 self._lora_indices_per_batch[:self.batch_size],
@@ -401,6 +409,12 @@ class PunicaWrapperBase(PunicaWrapperABC):
                         lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
                         scale: float,
                         output_slices: tuple[int, ...],
+                        a_start: Optional[torch.Tensor] = None,
+                        a_len: Optional[torch.Tensor] = None,
+                        a_loc: Optional[torch.Tensor] = None,
+                        a_scaling: Optional[torch.Tensor] = None,
+                        tmp_d: Optional[torch.Tensor] = None,
+                        # rank_counts: Optional[torch.Tensor] = None,
                         *,
                         buffer: Optional[tuple[torch.Tensor, ...]] = None,
                         **kwargs) -> Optional[torch.Tensor]:

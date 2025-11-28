@@ -1,0 +1,5 @@
+# lmcache.yaml
+chunk_size: 1024
+local_cpu: False
+remote_url: "lm://localhost:65434"
+remote_serde: "cachegen"

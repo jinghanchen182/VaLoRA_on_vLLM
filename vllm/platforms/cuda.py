@@ -435,7 +435,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
+        return "vllm.lora.punica_wrapper.punica_gpu.AtmmWrapperGPU"
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:

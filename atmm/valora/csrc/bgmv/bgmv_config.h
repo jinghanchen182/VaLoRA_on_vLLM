@@ -18,8 +18,9 @@ void bgmv_kernel(T* __restrict__ Y, const T* __restrict__ X, const T* __restrict
 
 // clang-format off
 #define FOR_BGMV_PARAM_wrapz(f,T,narrow,wide,thx,thy,thz,wrapx,wrapy)\
+    f(T,narrow,wide,thx,thy,thz,wrapx,wrapy,16) \
     f(T,narrow,wide,thx,thy,thz,wrapx,wrapy,32) \
-    // f(T,narrow,wide,thx,thy,thz,wrapx,wrapy,64)
+    f(T,narrow,wide,thx,thy,thz,wrapx,wrapy,64)
 
 //    f(T,narrow,wide,thx,thy,thz,wrapx,wrapy,4)\
 //    f(T,narrow,wide,thx,thy,thz,wrapx,wrapy,4)\
@@ -28,15 +29,17 @@ void bgmv_kernel(T* __restrict__ Y, const T* __restrict__ X, const T* __restrict
 
 
 #define FOR_BGMV_PARAM_wrapy(f,T,narrow,wide,thx,thy,thz,wrapx) \
+    FOR_BGMV_PARAM_wrapz(f,T,narrow,wide,thx,thy,thz,wrapx,16) \
     FOR_BGMV_PARAM_wrapz(f,T,narrow,wide,thx,thy,thz,wrapx,32) \
-    // FOR_BGMV_PARAM_wrapz(f,T,narrow,wide,thx,thy,thz,wrapx,64) \
+    FOR_BGMV_PARAM_wrapz(f,T,narrow,wide,thx,thy,thz,wrapx,64) \
     // FOR_BGMV_PARAM_wrapz(f,T,narrow,wide,thx,thy,thz,wrapx,128)
 
 
 
 #define FOR_BGMV_PARAM_wrapx(f,T,narrow,wide,thx,thy,thz)\
+    FOR_BGMV_PARAM_wrapy(f,T,narrow,wide,thx,thy,thz,16) \
     FOR_BGMV_PARAM_wrapy(f,T,narrow,wide,thx,thy,thz,32) \
-    // FOR_BGMV_PARAM_wrapy(f,T,narrow,wide,thx,thy,thz,64) \
+    FOR_BGMV_PARAM_wrapy(f,T,narrow,wide,thx,thy,thz,64) \
     // FOR_BGMV_PARAM_wrapy(f,T,narrow,wide,thx,thy,thz,128)
 
 //    FOR_BGMV_PARAM_wrapy(f,T,narrow,wide,thx,thy,thz,8)\
@@ -85,22 +88,25 @@ void bgmv_kernel(T* __restrict__ Y, const T* __restrict__ X, const T* __restrict
 
 
 #define FOR_BGMV_PARAM_thz(f,T,narrow,wide,thx,thy) \
+        FOR_BGMV_PARAM_wrapx(f,T,narrow,wide,thx,thy,16) \
         FOR_BGMV_PARAM_wrapx(f,T,narrow,wide,thx,thy,32) \
-        // FOR_BGMV_PARAM_wrapx(f,T,narrow,wide,thx,thy,64) \
+        FOR_BGMV_PARAM_wrapx(f,T,narrow,wide,thx,thy,64) \
 //        FOR_BGMV_PARAM_wrapx(f,T,narrow,wide,thx,thy,128)
 
 
 
 #define FOR_BGMV_PARAM_thy(f,T,narrow,wide,thx)\
+        FOR_BGMV_PARAM_thz(f,T,narrow,wide,thx,16)\
         FOR_BGMV_PARAM_thz(f,T,narrow,wide,thx,32)\
-        // FOR_BGMV_PARAM_thz(f,T,narrow,wide,thx,64)\
+        FOR_BGMV_PARAM_thz(f,T,narrow,wide,thx,64)\
         // FOR_BGMV_PARAM_thz(f,T,narrow,wide,thx,128)
 
 
 
 #define FOR_BGMV_PARAM_thx(f,T,narrow,wide)\
+    FOR_BGMV_PARAM_thy(f,T,narrow,wide,16)\
     FOR_BGMV_PARAM_thy(f,T,narrow,wide,32)\
-    // FOR_BGMV_PARAM_thy(f,T,narrow,wide,64)\
+    FOR_BGMV_PARAM_thy(f,T,narrow,wide,64)\
     // FOR_BGMV_PARAM_thy(f,T,narrow,wide,128)\
 //    FOR_BGMV_PARAM_thy(f,T,narrow,wide,256)\
 
@@ -110,6 +116,7 @@ void bgmv_kernel(T* __restrict__ Y, const T* __restrict__ X, const T* __restrict
 
 #define FOR_BGMV_WIDE(f, T, narrow) \
     FOR_BGMV_PARAM_thx(f,T,narrow, 4096) \
+    FOR_BGMV_PARAM_thx(f,T, narrow, 11008) 
     // FOR_BGMV_PARAM_thx(f,T,narrow, 6144) \
     // FOR_BGMV_PARAM_thx(f,T,narrow, 5120)
 //    FOR_BGMV_PARAM_thx(f,T,narrow, 1664) \

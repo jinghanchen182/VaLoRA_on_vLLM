@@ -123,7 +123,7 @@ def main():
         model = "mistralai/Mistral-7B-Instruct-v0.2"
     else:
         lmcache_connector = "LMCacheConnectorV1"
-        model = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+        model = "LargeWorldModel/LWM-Text-Chat-1M"
 
     setup_environment_variables(args.version)
 

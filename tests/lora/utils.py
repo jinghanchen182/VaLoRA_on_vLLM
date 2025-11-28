@@ -298,7 +298,7 @@ def generate_data_for_nslices(
         # shrink op need atomic_add, so output is initinized by 0
         our_out_tensor = torch.zeros(
             (nslices, total_tokens, max_rank),
-            dtype=torch.float32,
+            dtype=torch.float16,
         ).to(device)
     else:
         inputs_tensor = torch.rand(

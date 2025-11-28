@@ -1586,6 +1586,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # compiled with full CUDA graphs, we have to skip them entirely.
         skip_cuda_graphs = self.full_cuda_graph and not attention_cuda_graphs
 
+        num_loras = self.lora_manager._adapter_manager.lora_slots
+        rank = 16
+        a_start = torch.arange(0, num_loras * rank, step=rank, device=self.device, dtype=torch.long)
+        a_len = torch.full((num_loras,), rank, device=self.device, dtype=torch.long)
+        a_loc = torch.arange(0, num_loras * rank, device=self.device, dtype=torch.long)
+        a_scaling = torch.full((num_loras,), 1.0, device=self.device, dtype=self.model_config.dtype)
+        N0 = 32 * 4096
+        tmp_d = torch.zeros(N0 * 60, dtype=torch.int8, device=self.device)
+
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(
@@ -1602,6 +1611,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
+                a_start=a_start,
+                a_len=a_len,
+                a_loc=a_loc,
+                a_scaling=a_scaling,
+                tmp_d=tmp_d,
+                # rank_counts=rank_counts,
                 **model_kwargs,
             )
 
@@ -1980,6 +1995,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                   self.scheduler_config,
                                                   self.lora_config,
                                                   self.device)
+                logger.info(f"cjh lora slots 2: {self.lora_manager._adapter_manager.lora_slots}")
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
@@ -2300,6 +2316,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                     num_tokens, None, False)
 
+            num_loras = self.lora_manager._adapter_manager.lora_slots
+            rank = 16
+            a_start = torch.arange(0, num_loras * rank, step=rank, device=self.device, dtype=torch.long)
+            a_len = torch.full((num_loras,), rank, device=self.device, dtype=torch.long)
+            a_loc = torch.arange(0, num_loras * rank, device=self.device, dtype=torch.long)
+            a_scaling = torch.full((num_loras,), 1.0, device=self.device, dtype=self.model_config.dtype)
+            N0 = 32 * 4096
+            tmp_d = torch.zeros(N0 * 60, dtype=torch.int8, device=self.device)
+
             with self.maybe_randomize_inputs(input_ids), set_forward_context(
                     attn_metadata,
                     self.vllm_config,
@@ -2310,6 +2335,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
+                    a_start=a_start,
+                    a_len=a_len,
+                    a_loc=a_loc,
+                    a_scaling=a_scaling,
+                    tmp_d=tmp_d,
+                    # rank_counts=rank_counts,
                     **model_kwargs,
                 )
 

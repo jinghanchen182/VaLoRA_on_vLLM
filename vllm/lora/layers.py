@@ -32,6 +32,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.platforms import current_platform
 
+from vllm.logger import init_logger
+logger = init_logger(__name__)
+
 if TYPE_CHECKING:
     from vllm.lora.punica_wrapper import PunicaWrapperBase
 
@@ -312,6 +315,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     ) -> None:
         self.lora_config = lora_config
         #
+        # import traceback
+        # stack = traceback.format_stack()
+        # logger.info("create_lora_weights called from:\n" + "".join(stack))
         if isinstance(self.base_layer, ReplicatedLinear):
             lora_a_out_size = lora_config.max_lora_rank
             lora_b_out_size = self.output_size
@@ -408,12 +414,23 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
     def apply(self,
               x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+              bias: Optional[torch.Tensor] = None,
+              a_start: Optional[torch.Tensor] = None,
+              a_len: Optional[torch.Tensor] = None,
+              a_loc: Optional[torch.Tensor] = None,
+              a_scaling: Optional[torch.Tensor] = None,
+              tmp_d: Optional[torch.Tensor] = None,
+              # rank_counts: Optional[torch.Tensor] = None,
+            ) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
         # In transformers backend, x and output have extra batch dimension like
         # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
         # therefore we need to flatten the batch dimensions.
+        
+        # import traceback
+        # stack = traceback.format_stack()
+        # logger.info("add_lora_linear called from:\n" + "".join(stack))
         if x.ndim == 3 and output.ndim == 3:
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
@@ -421,7 +438,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         lora_output: Optional[
             torch.Tensor] = self.punica_wrapper.add_lora_linear(
                 output, x, self.lora_a_stacked, self.lora_b_stacked,
-                self.lora_bias_stacked, 1.0, self.output_slices)
+                self.lora_bias_stacked, 1.0, self.output_slices, a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
         if not current_platform.can_update_inplace():
             output = lora_output
 
@@ -563,7 +580,13 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         return bias
 
     def forward(
-        self, input_: torch.Tensor
+        self, input_: torch.Tensor,
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
+        # rank_counts: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
         """Forward of ColumnParallelLinear
 
@@ -578,7 +601,8 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
                 if not self.base_layer.skip_bias_add else None)
 
         # Matrix multiply.
-        output_parallel = self.apply(input_, bias)
+        # logger.info("ColumnParallelLinearWithLoRA")
+        output_parallel = self.apply(input_, bias, a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
         if self.base_layer.gather_output:
             # All-gather across the partitions.
             output = tensor_model_parallel_all_gather(output_parallel)
@@ -913,7 +937,13 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         return bias
 
     def forward(
-        self, input_: torch.Tensor
+        self, input_: torch.Tensor,
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
+        # rank_counts: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
         """Forward of RowParallelLinear
 
@@ -936,7 +966,8 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             input_parallel = splitted_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
-        output_parallel = self.apply(input_parallel)
+        # logger.info("RowParallelLinearWithLoRA")
+        output_parallel = self.apply(input_parallel, a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
         if self.base_layer.reduce_results and self.base_layer.tp_size > 1:
             output_ = tensor_model_parallel_all_reduce(output_parallel)
         else:

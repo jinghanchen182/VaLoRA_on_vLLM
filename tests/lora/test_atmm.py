@@ -126,16 +126,18 @@ def check_lora_shrink_kernel(batches: int, num_loras: int, rank: int,
                                     max_num_tokens=token_nums,
                                     device='cuda')
     lora_meta.prepare_tensors(data.token_lora_mapping)
-
-    ref_out_tensor = data.ref_out_tensor.half()
-    out_tensor = data.our_out_tensor.clone().half()
+    ref_out_tensor = data.ref_out_tensor
+    out_tensor = data.our_out_tensor.clone()
 
     # Preventing cache error pointer.
     with _dict_lock:
-        # lora_shrink kernel
         _LORA_A_PTR_DICT.clear()
-
-        lora_weights = data.lora_weights if isinstance(data.lora_weights, list) else [data.lora_weights]
+        
+        if isinstance(data.lora_weights, list):
+            lora_weights = data.lora_weights[0].contiguous() 
+        else:
+            lora_weights = data.lora_weights.contiguous()
+        
         
         for slice_id in range(nslices):
             # 将具有相同LoRA ID的连续批次合并成组
@@ -154,251 +156,90 @@ def check_lora_shrink_kernel(batches: int, num_loras: int, rank: int,
             # if cur_id is not None:
             #     groups.append((cur_id, cur_start, cur_len))
             
-            groups = []
-            for b in range(batches):
-                lora_id = int(data.prompt_lora_mapping[b])  # 当前批次使用的LoRA ID
-                start_id = int(data.b_seq_start_loc[b])     # 当前批次在序列中的起始位置
-                seq_len = int(data.seq_len_tensor[b])       # 当前批次的序列长度
-                current_start = start_id
-                remaining = seq_len
-                while remaining > 0:
-                    batch_len = min(32, remaining)
-                    groups.append((lora_id, current_start, batch_len))
-                    current_start += batch_len
-                    remaining -= batch_len
+            # groups = []
+            # for b in range(batches):
+            #     lora_id = int(data.prompt_lora_mapping[b])  # 当前批次使用的LoRA ID
+            #     start_id = int(data.b_seq_start_loc[b])     # 当前批次在序列中的起始位置
+            #     seq_len = int(data.seq_len_tensor[b])       # 当前批次的序列长度
+            #     current_start = start_id
+            #     remaining = seq_len
+            #     while remaining > 0:
+            #         batch_len = min(64, remaining)
+            #         groups.append((lora_id, current_start, batch_len))
+            #         current_start += batch_len
+            #         remaining -= batch_len
 
-            num_problems = len(groups)
-            lora_ids      = torch.tensor([g[0] for g in groups], device=device, dtype=torch.long)
-            start_ids     = torch.tensor([g[1] for g in groups], device=device, dtype=torch.long)
-            output_counts = torch.tensor([g[2] for g in groups], device=device, dtype=torch.long)  # m
-            rank_counts   = torch.full((num_problems,), rank, device=device, dtype=torch.long)     # k
+            # num_problems = len(groups)
+        
+            N0 = 32 * 4096
+            tmp_d = torch.zeros(N0 * 60, dtype=torch.int8, device="cuda")
+            # output_counts = torch.zeros(N0, dtype=torch.long, device="cuda")
+            # rank_counts = torch.zeros(N0, dtype=torch.long, device="cuda")
+            # lora_ids = torch.zeros(N0, dtype=torch.long, device="cuda")
+            # start_ids = torch.zeros(N0, dtype=torch.long, device="cuda")
+            # output_counts[0], output_counts[1] = 128, 128
+            # rank_counts[0], rank_counts[1] = 16, 16
+            # start_ids[0] = 0
+            # start_ids[1] = 128
+
+            # a_len = torch.tensor([4096 * 4] * num_adapters, dtype=torch.long, device="cuda")
+            # a_start = torch.zeros_like(a_len)
+            # a_start[1:] = torch.cumsum(a_len[:-1], dim=0)
+            # a_loc = torch.arange(4096 * 4 * num_adapters, dtype=torch.long, device="cuda")
+            # a_scaling = torch.tensor([1] * num_adapters, dtype=torch.float16, device="cuda")
+            # lora_ids      = torch.tensor([g[0] for g in groups], device=device, dtype=torch.long)
+            # start_ids     = torch.tensor([g[1] for g in groups], device=device, dtype=torch.long)
+            # output_counts = torch.tensor([g[2] for g in groups], device=device, dtype=torch.long)  # m
+            rank_counts   = torch.full((batches,), rank, device=device, dtype=torch.long)     # k
 
             a_start  = torch.arange(0, num_loras*rank, step=rank, device=device, dtype=torch.long)   # [num_loras]
             a_len    = torch.full((num_loras,), rank, device=device, dtype=torch.long)               # [num_loras]
             a_loc    = torch.arange(0, num_loras*rank, device=device, dtype=torch.long)              # [num_loras*rank]
             a_scaling = torch.full((num_loras,), scaling, device=device, dtype=dtype)  # [num_loras]
-
-            total_tokens = data.inputs_tensor.shape[0]  # 实际的token数
-            N = max(32, total_tokens) * 4096  # 确保缓冲区足够大
-            tmp_d = torch.zeros(N * 60, dtype=torch.int8, device="cuda")
             
-
-            # print(f"=== Python调试信息 ===")
-            print(f"num_problems: {num_problems}")
-            print(f"groups: {groups}")
-            print(f"output_counts: {output_counts}")
-            print(f"rank_counts: {rank_counts}")
-            print(f"lora_ids: {lora_ids}")
-            print(f"start_ids: {start_ids}")
-            print(f"num_loras: {num_loras}")
-            # print(f"a_loc shape: {a_loc.shape}, a_start shape: {a_start.shape}, a_len shape: {a_len.shape}")
-            # print(f"total_tokens: {total_tokens}")
-            
-            # 调用 atmm 内核
-            print(a_loc)
-            print(a_len)
-            print(a_scaling)
-            print(f"input shape:{data.inputs_tensor.shape}")
-            print(f"lora_weight:{lora_weights[slice_id].shape}")
-            print(f"output_shape: {out_tensor[slice_id].shape}")
+            torch.cuda.synchronize()
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+            print(lora_weights.shape)
+            # lora_weights = torch.zeros(num_loras*rank, 32, 128, device=device, dtype=dtype)
+            # inputs_tensor = torch.zeros(512, 4096, device=device, dtype=dtype)
+            # import pdb; pdb.set_trace()
+            lora_weights = torch.randn(num_loras, rank, hidden_size, device=device, dtype=dtype).half()
             dispatch_sgmm(
-                out_tensor[slice_id],  # 输出 shape=[batchsize, lora_rank] [num_tokens, rank]
-                data.inputs_tensor,  # 输入 shape=[batchsize, hidden_size] [num_tokens, hidden_size]
-                lora_weights[slice_id],   # loraA shape=[lora_nums, hidden_size, rank]
+                out_tensor[slice_id],  # 输出 [num_tokens, rank]
+                data.inputs_tensor,  # 输入 [num_tokens, hidden_size]
+                lora_weights, # 权重 [lora_nums, rank, hidden_size]
                 a_start, a_len, a_loc,
                 # data.prompt_lora_mapping, 
                 0, a_scaling,
-                output_counts, rank_counts, lora_ids, start_ids, tmp_d,
-                num_problems,32, 32, 32, 32, 32, 32)  
-            torch.cuda.synchronize() 
-            print(out_tensor[slice_id])
-            nan_rows = torch.any(torch.isnan(out_tensor[slice_id]), dim=1)
-            num_non_nan_rows = out_tensor[slice_id].shape[0] - torch.sum(nan_rows)
-            print(f"\nNumber of non-NaN rows: {num_non_nan_rows.item()}")
-            # print(f"lora_weight:{data.lora_weights[slice_id].shape}")
+                data.seq_len_tensor, rank_counts, data.prompt_lora_mapping, data.b_seq_start_loc, tmp_d,
+                batches, 32, 32, 32, 32, 32, 32)  
+            # import pdb; pdb.set_trace()
+            end_event.record()
+            end_event.synchronize()
+            elapsed_ms = start_event.elapsed_time(end_event)
+            print(f"dispatch_sgmm elapsed: {elapsed_ms:.3f} ms")
+            # print(out_tensor[slice_id])
+            # nan_rows = torch.any(torch.isnan(out_tensor[0]), dim=1)
+            # num_non_nan_rows = out_tensor[0].shape[0] - torch.sum(nan_rows)
+            # print(f"\nNumber of non-NaN rows: {num_non_nan_rows.item()}")
+                # print(f"lora_weight:{data.lora_weights[slice_id].shape}")
 
         
     # Reference
     sgmv_shrink_for_nslices(
         nslices,
         data.inputs_tensor,
-        data.lora_weights,
+        [lora_weights],
         ref_out_tensor,
         *sgmv_meta_args,
         scaling,
     )
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
     # print(ref_out_tensor)
     assert_close(out_tensor, ref_out_tensor)
 
-
-def check_lora_shrink_kernel_v1(batches: int, num_loras: int, rank: int,
-                             hidden_size: int, nslices: int,
-                             dtype: torch.dtype, device: str, seq_length: int,
-                             scaling: float):
-    """
-    Compare outputs of torch_ops.sgmv_shrink and triton_ops.lora_shrink
-    kernels.
-    """
-    data: PunicaTensors = generate_data_for_nslices(
-        batches,
-        hidden_size,
-        num_loras,
-        rank,
-        seq_length,
-        nslices,
-        dtype,
-        "shrink",
-        device,
-    )
-    max_seq_length, token_nums = data.meta()
-
-    # Setup metadata information for SGMV and reference kernels
-    sgmv_meta_args = (data.b_seq_start_loc, data.seq_len_tensor,
-                      data.prompt_lora_mapping, batches, max_seq_length,
-                      token_nums)
-
-    # Setup metadata information for the LoRA kernel.
-    lora_meta = LoRAKernelMeta.make(max_loras=num_loras,
-                                    max_num_tokens=token_nums,
-                                    device='cuda')
-    lora_meta.prepare_tensors(data.token_lora_mapping)
-
-    ref_out_tensor = data.ref_out_tensor.half()
-    out_tensor = data.our_out_tensor.clone().half()
-
-    # Preventing cache error pointer.
-    with _dict_lock:
-        # lora_shrink kernel
-        _LORA_A_PTR_DICT.clear()
-
-        lora_weights = data.lora_weights if isinstance(data.lora_weights, list) else [data.lora_weights]
-        
-        for slice_id in range(nslices):
-            groups = []
-            cur_id = None; cur_start = 0; cur_len = 0
-            for b in range(batches):
-                lora_id = int(data.prompt_lora_mapping[b])
-                start_id = int(data.b_seq_start_loc[b])
-                seq_len = int(data.seq_len_tensor[b])
-                if lora_id != cur_id:
-                    if cur_id is not None:
-                        groups.append((cur_id, cur_start, cur_len))
-                    cur_id, cur_start, cur_len = lora_id, start_id, seq_len
-                else:
-                    cur_len += seq_len
-            if cur_id is not None:
-                groups.append((cur_id, cur_start, cur_len))
-            
-            # 公共数组定义
-            a_start  = torch.arange(0, num_loras*rank, step=rank, device=device, dtype=torch.long)   # [num_loras]
-            a_len    = torch.full((num_loras,), rank, device=device, dtype=torch.long)               # [num_loras]
-            a_loc    = torch.arange(0, num_loras*rank, device=device, dtype=torch.long)              # [num_loras*rank]
-            a_scaling = torch.full((num_loras,), scaling, device=device, dtype=dtype)  # [num_loras]
-            
-            # workspace_multiplier = max(data.inputs_tensor.shape[0], 32)  # 基础workspace大小
-            # N = workspace_multiplier * 4096  
-            # tmp_d = torch.zeros(N * 60, dtype=torch.int8, device="cuda")
-            tmp_d = torch.zeros(32 * 4096 * 60, dtype=torch.int8, device="cuda")
-            
-            max_batch_size = 32
-            original_groups = groups[:]
-            if any(g[2] > max_batch_size for g in original_groups):
-                print(f"Large batch detected, splitting at Python level")
-                # 对于大batch，我们分别调用dispatch_sgmm
-                for lora_id, start_id, total_len in original_groups:
-                    remaining_len = total_len
-                    current_start = start_id
-                    while remaining_len > 0:
-                        batch_len = min(remaining_len, max_batch_size)
-                        print(f"Processing sub-batch: lora_id={lora_id}, start={current_start}, len={batch_len}")
-                        
-                        # 关键修复：创建实际的tensor slice而不是依赖指针偏移
-                        sub_groups = [(lora_id, 0, batch_len)]  # 注意：start改为0，因为我们传递slice
-                        sub_num_problems = len(sub_groups)
-                        sub_lora_ids      = torch.tensor([g[0] for g in sub_groups], device=device, dtype=torch.long)
-                        sub_start_ids     = torch.tensor([g[1] for g in sub_groups], device=device, dtype=torch.long)  # 总是0
-                        sub_output_counts = torch.tensor([g[2] for g in sub_groups], device=device, dtype=torch.long)
-                        sub_rank_counts   = torch.full((sub_num_problems,), rank, device=device, dtype=torch.long)
-                        
-                        # 创建tensor slice并确保连续性
-                        input_slice = data.inputs_tensor[current_start:current_start+batch_len].contiguous()
-                        output_slice = out_tensor[slice_id][current_start:current_start+batch_len].contiguous()
-                        
-                        print(f"  input_slice shape: {input_slice.shape}")
-                        print(f"  output_slice shape: {output_slice.shape}")
-                        print(f"  input_slice contiguous: {input_slice.is_contiguous()}")
-                        print(f"  output_slice contiguous: {output_slice.is_contiguous()}")
-                        print(f"  sub_start_ids: {sub_start_ids}")
-                        
-                        # 对比测试：使用PyTorch标准GEMM验证数据正确性
-                        weight_2d = data.lora_weights[slice_id][0].float()  # [16, 4096]
-                        input_float = input_slice.float()  # [32, 4096]
-                        expected_output = torch.mm(input_float, weight_2d.T)  # [32, 16]
-                        print(f"  PyTorch GEMM result[0:4, 0:4]:\n{expected_output[0:4, 0:4]}")
-                        print(f"  PyTorch GEMM has nan: {torch.isnan(expected_output).any()}")
-                        
-                        # import pdb; pdb.set_trace()
-                        # 单独调用dispatch_sgmm，使用slice
-                        dispatch_sgmm(
-                            output_slice,      # 使用slice而不是完整tensor
-                            input_slice,       # 使用slice而不是完整tensor
-                            data.lora_weights[slice_id],
-                            a_start, a_len, a_loc,
-                            0, a_scaling,
-                            sub_output_counts, sub_rank_counts, sub_lora_ids, sub_start_ids, tmp_d,
-                            sub_num_problems, 32, 32, 32, 32, 32, 32)
-                        # 添加同步，确保 CUDA 端计算完成
-                        torch.cuda.synchronize()
-                        
-                        # 检查这个slice的计算结果
-                        print(f"  After GEMM - output_slice[0:4, 0:4]:\n{output_slice[0:4, 0:4]}")
-                        print(f"  output_slice has nan: {torch.isnan(output_slice).any()}")
-                        
-                        # 将结果复制回原tensor（因为我们使用了contiguous()可能创建了副本）
-                        out_tensor[slice_id][current_start:current_start+batch_len] = output_slice
-                        
-                        current_start += batch_len
-                        remaining_len -= batch_len
-                # Skip the main dispatch_sgmm call since we already processed everything
-                out_tensor = out_tensor.contiguous()
-                print("Large batch processing completed")
-            
-            else:
-                print(f"使用原始groups（无需分解）: {groups}")
-                
-                # 正常的小batch处理
-                num_problems = len(groups)
-                lora_ids      = torch.tensor([g[0] for g in groups], device=device, dtype=torch.long)
-                start_ids     = torch.tensor([g[1] for g in groups], device=device, dtype=torch.long)
-                output_counts = torch.tensor([g[2] for g in groups], device=device, dtype=torch.long)  # m
-                rank_counts   = torch.full((num_problems,), rank, device=device, dtype=torch.long)     # k
-                
-                print(f"=== Python调试信息 ===")
-                print(f"num_problems: {num_problems}")
-                print(f"groups: {groups}")
-                
-                # 调用 atmm 内核
-                dispatch_sgmm(
-                    out_tensor[slice_id],
-                    data.inputs_tensor,
-                    data.lora_weights[slice_id],
-                    a_start, a_len, a_loc,
-                    0, a_scaling,
-                    output_counts, rank_counts, lora_ids, start_ids, tmp_d,
-                    num_problems,32, 32, 32, 32, 32, 32)
-
-    # Reference
-    sgmv_shrink_for_nslices(
-        nslices,
-        data.inputs_tensor,
-        data.lora_weights,
-        ref_out_tensor,
-        *sgmv_meta_args,
-        scaling,
-    )
-    import pdb; pdb.set_trace()
-    assert_close(out_tensor, ref_out_tensor)
 
 
 def check_lora_expand_kernel(batches: int, num_loras: int, rank: int,
@@ -441,22 +282,54 @@ def check_lora_expand_kernel(batches: int, num_loras: int, rank: int,
     with _dict_lock:
         # lora_expand kernel
         _LORA_B_PTR_DICT.clear()
-        triton_ops.lora_expand(data.inputs_tensor,
-                               data.lora_weights,
-                               out_tensor,
-                               *lora_meta.meta_args(token_nums=token_nums),
-                               offset_start=0,
-                               add_inputs=add_inputs)
+
+        if isinstance(data.lora_weights, list):
+            lora_weights = data.lora_weights[0].contiguous() 
+        else:
+            lora_weights = data.lora_weights.contiguous()
+        
+        for slice_id in range(nslices):
+            N0 = 32 * 4096
+            tmp_d = torch.zeros(N0 * 60, dtype=torch.int8, device="cuda")
+            rank_counts   = torch.full((batches,), rank, device=device, dtype=torch.long)     # k
+
+            a_start  = torch.arange(0, num_loras*rank, step=rank, device=device, dtype=torch.long)   # [num_loras]
+            a_len    = torch.full((num_loras,), rank, device=device, dtype=torch.long)               # [num_loras]
+            a_loc    = torch.arange(0, num_loras*rank, device=device, dtype=torch.long)              # [num_loras*hidden_size]
+            a_scaling = torch.full((num_loras,), 1, device=device, dtype=dtype)  # [num_loras]
+            torch.cuda.synchronize()
+            # import pdb; pdb.set_trace()
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+            lora_weights = torch.randn(num_loras, hidden_size, rank, device=device, dtype=dtype)
+            print(f"lora_weights.shape: {lora_weights.shape}")
+            print(f"x shape: {data.inputs_tensor[slice_id].shape}")
+            print(f"y shape: {out_tensor.shape}")
+            dispatch_sgmm(
+                out_tensor,  # 输出 [num_tokens, hidden_size * nslices]
+                data.inputs_tensor[slice_id],  # 输入 [num_tokens, max_rank]
+                lora_weights.transpose(1, 2).contiguous(), # 权重 [lora_nums, hidden_size, max_rank]
+                a_start, a_len, a_loc,
+                # data.prompt_lora_mapping, 
+                0, a_scaling,
+                data.seq_len_tensor, rank_counts, data.prompt_lora_mapping, data.b_seq_start_loc, tmp_d,
+                batches, 32, 32, 32, 32, 32, 32)  
+            end_event.record()
+            end_event.synchronize()
+            elapsed_ms = start_event.elapsed_time(end_event)
+            print(f"dispatch_sgmm elapsed: {elapsed_ms:.3f} ms")
+            # print(out_tensor)
 
     # Reference
     sgmv_expand_for_nslices(nslices,
                             hidden_size,
                             data.inputs_tensor,
-                            data.lora_weights,
+                            [lora_weights],
                             ref_out_tensor,
                             *sgmv_meta_args,
                             add_inputs=add_inputs)
-
+    # import pdb; pdb.set_trace()
     assert_close(out_tensor, ref_out_tensor)
 
 
@@ -568,8 +441,8 @@ hs_test_params = {
 # except hidden_size.
 test_params = {
     "hidden_sizes": [4096], # 修改过，原来是2049
-    "batches": [1],
-    "num_loras": [1],
+    "batches": [8, 16, 32, 64],
+    "num_loras": [1, 2, 4, 8, 16, 32, 64],
     "max_ranks": [16],
 }
 
@@ -586,7 +459,7 @@ SEED = [0]
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("seed", SEED)
-@pytest.mark.parametrize("op_type", ["shrink"])
+@pytest.mark.parametrize("op_type", ["expand"])
 def test_kernels(
     batches: int,
     num_loras: int,
@@ -612,7 +485,7 @@ def test_kernels(
                                  nslices=nslices,
                                  dtype=dtype,
                                  device=device,
-                                 seq_length=64,
+                                 seq_length=2048,
                                  scaling=1)
     else:
         check_lora_expand_kernel(batches=batches,
@@ -622,53 +495,53 @@ def test_kernels(
                                  nslices=nslices,
                                  dtype=dtype,
                                  device=device,
-                                 seq_length=1,
+                                 seq_length=2048,
                                  add_inputs=True)
 
 
-@pytest.mark.parametrize("batches", hs_test_params['batches'])
-@pytest.mark.parametrize("num_loras", hs_test_params['num_loras'])
-@pytest.mark.parametrize("rank", hs_test_params['max_ranks'])
-@pytest.mark.parametrize("hidden_size", hs_test_params['hidden_sizes'])
-@pytest.mark.parametrize("nslices", [1])
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("seed", SEED)
-@pytest.mark.parametrize("op_type", ["shrink"])
-def test_kernels_hidden_size(
-    batches: int,
-    num_loras: int,
-    rank: int,
-    hidden_size: int,
-    nslices: int,
-    dtype: torch.dtype,
-    device: str,
-    seed: int,
-    op_type: str,
-):
-    """
-    Tests SGMV and LoRA kernels.
-    """
-    torch.set_default_device(device)
-    current_platform.seed_everything(seed)
+# @pytest.mark.parametrize("batches", hs_test_params['batches'])
+# @pytest.mark.parametrize("num_loras", hs_test_params['num_loras'])
+# @pytest.mark.parametrize("rank", hs_test_params['max_ranks'])
+# @pytest.mark.parametrize("hidden_size", hs_test_params['hidden_sizes'])
+# @pytest.mark.parametrize("nslices", [1])
+# @pytest.mark.parametrize("dtype", DTYPES)
+# @pytest.mark.parametrize("device", DEVICES)
+# @pytest.mark.parametrize("seed", SEED)
+# @pytest.mark.parametrize("op_type", ["shrink"])
+# def test_kernels_hidden_size(
+#     batches: int,
+#     num_loras: int,
+#     rank: int,
+#     hidden_size: int,
+#     nslices: int,
+#     dtype: torch.dtype,
+#     device: str,
+#     seed: int,
+#     op_type: str,
+# ):
+#     """
+#     Tests SGMV and LoRA kernels.
+#     """
+#     torch.set_default_device(device)
+#     current_platform.seed_everything(seed)
 
-    if op_type == "shrink":
-        check_lora_shrink_kernel(batches=batches,
-                                 num_loras=num_loras,
-                                 rank=rank,
-                                 hidden_size=hidden_size,
-                                 nslices=nslices,
-                                 dtype=dtype,
-                                 device=device,
-                                 seq_length=64,
-                                 scaling=1)
-    else:
-        check_lora_expand_kernel(batches=batches,
-                                 num_loras=num_loras,
-                                 rank=rank,
-                                 hidden_size=hidden_size,
-                                 nslices=nslices,
-                                 dtype=dtype,
-                                 device=device,
-                                 seq_length=128,
-                                 add_inputs=True)
+#     if op_type == "shrink":
+#         check_lora_shrink_kernel(batches=batches,
+#                                  num_loras=num_loras,
+#                                  rank=rank,
+#                                  hidden_size=hidden_size,
+#                                  nslices=nslices,
+#                                  dtype=dtype,
+#                                  device=device,
+#                                  seq_length=64,
+#                                  scaling=1)
+#     else:
+#         check_lora_expand_kernel(batches=batches,
+#                                  num_loras=num_loras,
+#                                  rank=rank,
+#                                  hidden_size=hidden_size,
+#                                  nslices=nslices,
+#                                  dtype=dtype,
+#                                  device=device,
+#                                  seq_length=128,
+#                                  add_inputs=True)

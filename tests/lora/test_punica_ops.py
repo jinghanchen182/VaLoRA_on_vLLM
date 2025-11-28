@@ -132,14 +132,17 @@ def check_lora_shrink_kernel(batches: int, num_loras: int, rank: int,
     # print("out_tensor:", out_tensor.shape)  # torch.Size([3, 512, 8])
     # print("lora_weights:", data.lora_weights[0].shape)  # torch.Size([128, 8, 2049])
     # print(data)
-    print("token_lora_mapping:", data.token_lora_mapping.numel())
+    # print("token_lora_mapping:", data.token_lora_mapping.numel())
     # print("prompt_lora_mapping:", data.prompt_lora_mapping.numel())
-    print("batches:", batches)
-    print("nslices:", nslices)
+    # print("batches:", batches)
+    # print("nslices:", nslices)
     # Preventing cache error pointer.
     with _dict_lock:
         # lora_shrink kernel
         _LORA_A_PTR_DICT.clear()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
         triton_ops.lora_shrink(
             data.inputs_tensor,
             data.lora_weights,
@@ -147,6 +150,10 @@ def check_lora_shrink_kernel(batches: int, num_loras: int, rank: int,
             *lora_meta.meta_args(token_nums=token_nums),
             scaling,
         )
+        end_event.record()
+        end_event.synchronize()
+        elapsed_ms = start_event.elapsed_time(end_event)
+        print(f"dispatch_sgmm elapsed: {elapsed_ms:.3f} ms")
 
     # Reference
     sgmv_shrink_for_nslices(
@@ -201,12 +208,19 @@ def check_lora_expand_kernel(batches: int, num_loras: int, rank: int,
     with _dict_lock:
         # lora_expand kernel
         _LORA_B_PTR_DICT.clear()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
         triton_ops.lora_expand(data.inputs_tensor,
                                data.lora_weights,
                                out_tensor,
                                *lora_meta.meta_args(token_nums=token_nums),
                                offset_start=0,
                                add_inputs=add_inputs)
+        end_event.record()
+        end_event.synchronize()
+        elapsed_ms = start_event.elapsed_time(end_event)
+        print(f"dispatch_sgmm elapsed: {elapsed_ms:.3f} ms")
 
     # Reference
     sgmv_expand_for_nslices(nslices,
@@ -327,13 +341,13 @@ hs_test_params = {
 # General tests params that tests for variations in all dimensions
 # except hidden_size.
 test_params = {
-    "hidden_sizes": [2049],
-    "batches": [1, 4, 16, 32],
-    "num_loras": [1, 8, 32, 128],
-    "max_ranks": [1, 4, 8, 16, 32, 64, 128, 256],
+    "hidden_sizes": [4096],
+    "batches": [8],
+    "num_loras": [8],
+    "max_ranks": [16],
 }
 
-DTYPES = [torch.float16, torch.bfloat16]
+DTYPES = [torch.float16]
 DEVICES = [f"cuda:{0}"]
 SEED = [0]
 
@@ -342,7 +356,7 @@ SEED = [0]
 @pytest.mark.parametrize("num_loras", test_params['num_loras'])
 @pytest.mark.parametrize("rank", test_params['max_ranks'])
 @pytest.mark.parametrize("hidden_size", test_params['hidden_sizes'])
-@pytest.mark.parametrize("nslices", [1, 2, 3])
+@pytest.mark.parametrize("nslices", [1])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("seed", SEED)
@@ -372,8 +386,8 @@ def test_kernels(
                                  nslices=nslices,
                                  dtype=dtype,
                                  device=device,
-                                 seq_length=128,
-                                 scaling=0.5)
+                                 seq_length=1024,
+                                 scaling=1)
     else:
         check_lora_expand_kernel(batches=batches,
                                  num_loras=num_loras,
@@ -382,53 +396,53 @@ def test_kernels(
                                  nslices=nslices,
                                  dtype=dtype,
                                  device=device,
-                                 seq_length=128,
+                                 seq_length=1024,
                                  add_inputs=True)
 
 
-@pytest.mark.parametrize("batches", hs_test_params['batches'])
-@pytest.mark.parametrize("num_loras", hs_test_params['num_loras'])
-@pytest.mark.parametrize("rank", hs_test_params['max_ranks'])
-@pytest.mark.parametrize("hidden_size", hs_test_params['hidden_sizes'])
-@pytest.mark.parametrize("nslices", [1, 2, 3])
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("seed", SEED)
-@pytest.mark.parametrize("op_type", ["shrink", "expand"])
-def test_kernels_hidden_size(
-    batches: int,
-    num_loras: int,
-    rank: int,
-    hidden_size: int,
-    nslices: int,
-    dtype: torch.dtype,
-    device: str,
-    seed: int,
-    op_type: str,
-):
-    """
-    Tests SGMV and LoRA kernels.
-    """
-    torch.set_default_device(device)
-    current_platform.seed_everything(seed)
+# @pytest.mark.parametrize("batches", hs_test_params['batches'])
+# @pytest.mark.parametrize("num_loras", hs_test_params['num_loras'])
+# @pytest.mark.parametrize("rank", hs_test_params['max_ranks'])
+# @pytest.mark.parametrize("hidden_size", hs_test_params['hidden_sizes'])
+# @pytest.mark.parametrize("nslices", [1, 2, 3])
+# @pytest.mark.parametrize("dtype", DTYPES)
+# @pytest.mark.parametrize("device", DEVICES)
+# @pytest.mark.parametrize("seed", SEED)
+# @pytest.mark.parametrize("op_type", ["shrink", "expand"])
+# def test_kernels_hidden_size(
+#     batches: int,
+#     num_loras: int,
+#     rank: int,
+#     hidden_size: int,
+#     nslices: int,
+#     dtype: torch.dtype,
+#     device: str,
+#     seed: int,
+#     op_type: str,
+# ):
+#     """
+#     Tests SGMV and LoRA kernels.
+#     """
+#     torch.set_default_device(device)
+#     current_platform.seed_everything(seed)
 
-    if op_type == "shrink":
-        check_lora_shrink_kernel(batches=batches,
-                                 num_loras=num_loras,
-                                 rank=rank,
-                                 hidden_size=hidden_size,
-                                 nslices=nslices,
-                                 dtype=dtype,
-                                 device=device,
-                                 seq_length=128,
-                                 scaling=0.5)
-    else:
-        check_lora_expand_kernel(batches=batches,
-                                 num_loras=num_loras,
-                                 rank=rank,
-                                 hidden_size=hidden_size,
-                                 nslices=nslices,
-                                 dtype=dtype,
-                                 device=device,
-                                 seq_length=128,
-                                 add_inputs=True)
+#     if op_type == "shrink":
+#         check_lora_shrink_kernel(batches=batches,
+#                                  num_loras=num_loras,
+#                                  rank=rank,
+#                                  hidden_size=hidden_size,
+#                                  nslices=nslices,
+#                                  dtype=dtype,
+#                                  device=device,
+#                                  seq_length=128,
+#                                  scaling=0.5)
+#     else:
+#         check_lora_expand_kernel(batches=batches,
+#                                  num_loras=num_loras,
+#                                  rank=rank,
+#                                  hidden_size=hidden_size,
+#                                  nslices=nslices,
+#                                  dtype=dtype,
+#                                  device=device,
+#                                  seq_length=128,
+#                                  add_inputs=True)

@@ -74,12 +74,12 @@ __global__ void precompute_sgmm_args_for_shrink(cutlass::gemm::GemmCoord *all_pr
   ld_w[i] = feat_in;
   ld_y[i] = feat_out;
   
-  printf("m=%d, n=%d, k=%d, feat_in=%d, feat_out=%d\n", m, n, k, feat_in, feat_out);
+  // printf("m=%d, n=%d, k=%d, feat_in=%d, feat_out=%d\n", m, n, k, feat_in, feat_out);
   // printf("start_ids[%d] = %ld, lora_idx = %d, idx = %d\n", i, start_ids[i], (int)lora_idx, (int)idx);
-  printf("Pointers: ptr_x offset = %ld, ptr_y offset = %ld, ptr_w offset = %ld\n", 
-         (long)(ptr_x[i] - x), (long)(ptr_y[i] - y), (long)(ptr_w[i] - w));
-  printf("Leading dimensions: ld_x[%d]=%ld, ld_w[%d]=%ld, ld_y[%d]=%ld\n", 
-         i, ld_x[i], i, ld_w[i], i, ld_y[i]);
+  // printf("Pointers: ptr_x offset = %ld, ptr_y offset = %ld, ptr_w offset = %ld\n", 
+  //        (long)(ptr_x[i] - x), (long)(ptr_y[i] - y), (long)(ptr_w[i] - w));
+  // printf("Leading dimensions: ld_x[%d]=%ld, ld_w[%d]=%ld, ld_y[%d]=%ld\n", 
+  //        i, ld_x[i], i, ld_w[i], i, ld_y[i]);
   // 这里 shrink 有点问题，w 和 x 都是 row major 的，
 }
 
@@ -114,6 +114,12 @@ __global__ void precompute_sgmm_args_for_expand(cutlass::gemm::GemmCoord *all_pr
   ld_x[i] = feat_in;
   ld_w[i] = n;
   ld_y[i] = n;
+  // printf("m=%d, n=%d, k=%d, feat_in=%d, feat_out=%d\n", m, n, k, feat_in, feat_out);
+  // printf("start_ids[%d] = %ld, lora_idx = %d, idx = %d\n", i, start_ids[i], (int)lora_idx, (int)idx);
+  // printf("Pointers: ptr_x offset = %ld, ptr_y offset = %ld, ptr_w offset = %ld\n", 
+  //        (long)(ptr_x[i] - x), (long)(ptr_y[i] - y), (long)(ptr_w[i] - w));
+  // printf("Leading dimensions: ld_x[%d]=%ld, ld_w[%d]=%ld, ld_y[%d]=%ld\n", 
+  //        i, ld_x[i], i, ld_w[i], i, ld_y[i]);
   // printf("i %d,ld_x[i] %d,ld_y[i] %d\n", (i,ld_x[i],ld_y[i]));
 }
 
@@ -160,14 +166,14 @@ bool PerformGemmGrouped(cutlass::gemm::GemmCoord * all_problems, int num_problem
         cutlass::gemm::GemmShape<ins_x, ins_y, ins_z>,             // Instruction Shape
         LinearCombination,  // Epilogue
         GemmIdentityThreadblockSwizzle,              // Swizzling Operator
-        1                                               // Stages
+        3                                               // Stages
         >::GemmKernel;
 
     using EpilogueOutputOp = typename GemmKernel::Epilogue::OutputOp;
     typename EpilogueOutputOp::Params epilogue_op(lora_alpha, 1.0);
 
     using GemmGrouped = cutlass::gemm::device::GemmGrouped<GemmKernel>;
-    typename GemmGrouped::Arguments args(all_problems, num_problems, 1024,
+    typename GemmGrouped::Arguments args(all_problems, num_problems, 512,
                                          epilogue_op, ptr_X, ptr_W, ptr_Y,
                                          ptr_Y, ld_X, ld_W, ld_Y, ld_Y);
 
@@ -377,7 +383,7 @@ void bgmv_kernel(T* __restrict__ Y, const T* __restrict__ X, const T* __restrict
 
     }
     else {
-      printf("Executing shrink GEMM (fallback)...\n");
+      // printf("Executing shrink GEMM (fallback)...\n");
       success = PerformGemmGrouped<cutlass_t, LinearCombination, GemmIdentityThreadblockSwizzle, cutlass::arch::Sm80, thrd_x, thrd_y, thrd_z, warp_x, warp_y, warp_z, 16, 8, 16>(
                                     all_problems, num_problems, 1.0, ptr_Y, ptr_X,
                                     ptr_W, ld_Y, ld_X, ld_W, stream);

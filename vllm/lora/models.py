@@ -784,4 +784,5 @@ def create_lora_manager(
         lora_config=lora_config,
         device=device,
         **kwargs)
+    logger.info(f"cjh lora slots 1: {lora_manager.lora_slots}")
     return lora_manager
