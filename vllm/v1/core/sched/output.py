@@ -155,3 +155,11 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+    
+    # LoRA merge相关字段
+    # 需要从模型权重中减去的lora_id (unmerge操作)
+    lora_id_to_unmerge: Optional[int] = None
+    # 需要加到模型权重中的lora_id (merge操作)
+    lora_id_to_merge: Optional[int] = None
+    # 当前的merge模式: "merge" 或 "unmerge"
+    merge_mode: str = "unmerge"

@@ -417,6 +417,35 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+        # 处理LoRA merge/unmerge操作
+        if hasattr(self, 'lora_manager') and self.lora_manager is not None:
+            # 如果需要unmerge旧的lora
+            if scheduler_output.lora_id_to_unmerge is not None:
+                lora_id = scheduler_output.lora_id_to_unmerge
+                logger.info(f"Worker: unmerge lora_id {lora_id} from model weights")
+                self.lora_manager._adapter_manager.unmerge_lora(lora_id)
+            
+            # 如果需要merge新的lora
+            if scheduler_output.lora_id_to_merge is not None:
+                lora_id = scheduler_output.lora_id_to_merge
+                logger.info(f"Worker: merge lora_id {lora_id} into model weights")
+                self.lora_manager._adapter_manager.merge_lora(lora_id)
+            
+            # 在merge模式下，将使用merge_lora_id的请求的lora_request设置为None
+            # 因为它们的lora权重已经merge到基础模型中，不需要执行额外的lora计算
+            if scheduler_output.merge_mode == "merge" and \
+               scheduler_output.lora_id_to_merge is not None:
+                merge_lora_id = scheduler_output.lora_id_to_merge
+                for req_id in scheduler_output.num_scheduled_tokens.keys():
+                    if req_id in self.requests:
+                        req = self.requests[req_id]
+                        if req.lora_request is not None and \
+                           req.lora_request.lora_int_id == merge_lora_id:
+                            # 临时将lora_request设置为None，避免执行额外的lora计算
+                            logger.debug(f"Skip lora computation for request {req_id} "
+                                       f"with merged lora_id {merge_lora_id}")
+                            req.lora_request = None
+        
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
