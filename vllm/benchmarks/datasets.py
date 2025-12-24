@@ -16,6 +16,7 @@ import io
 import json
 import logging
 import random
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -75,6 +76,7 @@ class SampleRequest:
         Union[MultiModalDataDict, dict, list[dict]]
     ] = None
     lora_request: Optional[LoRARequest] = None
+    lora_name: Optional[str] = None  # 用于 benchmark serve 时指定 LoRA 名称
 
 
 # -----------------------------------------------------------------------------
@@ -322,8 +324,13 @@ class RandomDataset(BenchmarkDataset):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        random.seed(self.random_seed)
-        np.random.seed(self.random_seed)
+        # random.seed(self.random_seed)
+        # np.random.seed(self.random_seed)
+        
+        # Use numpy's default_rng for deterministic sampling
+        # Do not use random.seed() or np.random.seed() elsewhere in this class.
+        # This ensures that the RNG is isolated from global RNG state.
+        self._rng = np.random.default_rng(self.random_seed)
 
     def sample(
         self,
@@ -333,6 +340,9 @@ class RandomDataset(BenchmarkDataset):
         range_ratio: float = DEFAULT_RANGE_RATIO,
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
+        lora_skew: Optional[float] = None,
+        lora1_name: Optional[str] = None,
+        lora2_name: Optional[str] = None,
         **kwargs,
     ) -> list[SampleRequest]:
         # Enforce range_ratio < 1
@@ -340,59 +350,146 @@ class RandomDataset(BenchmarkDataset):
             "random_range_ratio must be < 1.0 to ensure a valid sampling range"
         )
 
-        vocab_size = tokenizer.vocab_size
-        num_special_tokens = tokenizer.num_special_tokens_to_add()
-        real_input_len = input_len - num_special_tokens
+        input_lens, output_lens, offsets = self.get_sampling_params(
+            num_requests, range_ratio, input_len, output_len, tokenizer
+        )
 
-        prefix_token_ids = (np.random.randint(
-            0, vocab_size, size=prefix_len).tolist() if prefix_len > 0 else [])
-
-        # New sampling logic: [X * (1 - b), X * (1 + b)]
-        input_low = int(real_input_len * (1 - range_ratio))
-        input_high = int(real_input_len * (1 + range_ratio))
-        output_low = int(output_len * (1 - range_ratio))
-        output_high = int(output_len * (1 + range_ratio))
-
-        # Add logging for debugging
-        logger.info(
-            "Sampling input_len from [%s, %s] and output_len from [%s, %s]",
-            input_low, input_high, output_low, output_high)
-
-        input_lens = np.random.randint(input_low,
-                                       input_high + 1,
-                                       size=num_requests)
-        output_lens = np.random.randint(output_low,
-                                        output_high + 1,
-                                        size=num_requests)
-        offsets = np.random.randint(0, vocab_size, size=num_requests)
+        # 计算 lora 请求的分布
+        lora_names_list = []
+        if lora_skew is not None:
+            if not (lora1_name and lora2_name):
+                raise ValueError(
+                    "使用 --lora-skew 时必须同时提供 --lora1-name 和 --lora2-name 参数"
+                )
+            if not (0.0 <= lora_skew <= 1.0):
+                raise ValueError(f"lora_skew 必须在 0.0 到 1.0 之间，当前值: {lora_skew}")
+            
+            # 计算 lora1 的请求数量（倾斜度 * 总请求数）
+            num_lora1 = int(num_requests * lora_skew)
+            num_lora2 = num_requests - num_lora1
+            
+            print(f"LoRA 分布: {lora1_name}={num_lora1} 个请求, {lora2_name}={num_lora2} 个请求 (倾斜度={lora_skew})")
+            
+            # 创建 LoRA 名称列表：前 num_lora1 个使用 lora1，其余使用 lora2
+            lora_names_list = [lora1_name] * num_lora1 + [lora2_name] * num_lora2
+            # 打乱 lora 名称的顺序，使其随机分布
+            random.shuffle(lora_names_list)
 
         requests = []
         for i in range(num_requests):
-            inner_seq = ((offsets[i] + i + np.arange(input_lens[i])) %
-                         vocab_size).tolist()
-            token_sequence = prefix_token_ids + inner_seq
-            prompt = tokenizer.decode(token_sequence)
-            # After decoding the prompt we have to encode and decode it again.
-            # This is done because in some cases N consecutive tokens
-            # give a string tokenized into != N number of tokens.
-            # For example for GPT2Tokenizer:
-            # [6880, 6881] -> ['Ġcalls', 'here'] ->
-            # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
-            # To avoid uncontrolled change of the prompt length,
-            # the encoded sequence is truncated before being decode again.
-            total_input_len = prefix_len + int(input_lens[i])
-            re_encoded_sequence = tokenizer.encode(
-                prompt, add_special_tokens=False)[:total_input_len]
-            prompt = tokenizer.decode(re_encoded_sequence)
-            total_input_len = len(re_encoded_sequence)
+            prompt, total_input_len = self.generate_token_sequence(
+                tokenizer=tokenizer,
+                prefix_len=prefix_len,
+                input_len=int(input_lens[i]),
+                index=i
+            )
+            
+            lora_name = lora_names_list[i] if lora_names_list else None
+            
             requests.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=total_input_len,
                     expected_output_len=int(output_lens[i]),
-                ))
+                    lora_name=lora_name
+                )
+            )
         return requests
 
+    def get_sampling_params(
+        self,
+        num_requests: int,
+        range_ratio: float,
+        input_len: int,
+        output_len: int,
+        tokenizer: PreTrainedTokenizerBase,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Get the sampling parameters for the dataset.
+        """
+        # Enforce range_ratio < 1
+        if not (0.0 <= range_ratio < 1.0):
+            raise ValueError("range_ratio must be in [0, 1).")
+        num_special_tokens = int(tokenizer.num_special_tokens_to_add())
+        real_input_len = max(0, int(input_len) - num_special_tokens)
+        # Bounds use floor for low and ceil for high
+        input_low = math.floor(real_input_len * (1 - range_ratio))
+        input_high = math.ceil(real_input_len * (1 + range_ratio))
+        output_low = math.floor(output_len * (1 - range_ratio))
+        output_high = math.ceil(output_len * (1 + range_ratio))
+        # Ensure the lower bound for output length is at least 1 to
+        # prevent sampling 0 tokens.
+        output_low = max(output_low, 1)
+
+        if input_low > input_high:
+            raise ValueError(
+                "Invalid input sampling interval: "
+                f"low={input_low} > high={input_high}"
+            )
+        if output_low > output_high:
+            raise ValueError(
+                "Invalid output sampling interval: "
+                f"low={output_low} > high={output_high}"
+            )
+
+        logger.info(
+            "Sampling input_len from [%s, %s] and output_len from [%s, %s]",
+            input_low,
+            input_high,
+            output_low,
+            output_high,
+        )
+
+        input_lens = self._rng.integers(input_low, input_high + 1,
+                                           size=num_requests)
+        output_lens = self._rng.integers(output_low, output_high + 1,
+                                            size=num_requests)
+        offsets = self._rng.integers(0, tokenizer.vocab_size, 
+                                        size=num_requests)
+        return input_lens, output_lens, offsets
+
+
+    def generate_token_sequence(
+        self,
+        *,
+        tokenizer: PreTrainedTokenizerBase,
+        prefix_len: int,
+        input_len: int,
+        index: int,
+    ) -> tuple[str, int]:
+        """
+        Returns (prompt, total_input_len).
+
+        NOTE: After decoding the prompt we have to encode and decode it again.
+        This is done because in some cases N consecutive tokens
+        give a string tokenized into != N number of tokens.
+        For example for GPT2Tokenizer:
+        [6880, 6881] -> ['Ġcalls', 'here'] ->
+        [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
+        To avoid uncontrolled change of the prompt length,
+        the encoded sequence is truncated before being decode again.
+        """
+        # Read the line from the JSONL file based on input_len
+        jsonl_path = "/data/miliang/vllm/hotpotwikiqa_mixup_256k.jsonl" #共124行
+        line_number = index + 1
+        with open(jsonl_path, 'r', encoding='utf-8') as f:
+            for i in range(line_number):
+                line = f.readline()
+                if not line: # 如果文件行数不够，循环回第一行
+                    f.seek(0)
+                    line = f.readline()
+            data = json.loads(line)
+        # Add input_len as prefix to the prompt
+        # 将 input_len 向下取整到最近的万位，例如20010->20000
+        prompt = f"{data}"
+        total_input_len = prefix_len + int(input_len)
+        # Calculate total input length based on tokenized prompt
+        re_encoded_sequence = tokenizer.encode(
+            prompt, add_special_tokens=False)[:total_input_len]
+        prompt = tokenizer.decode(re_encoded_sequence)
+        total_input_len = len(re_encoded_sequence)
+
+        return prompt, total_input_len
 
 # -----------------------------------------------------------------------------
 # ShareGPT Dataset Implementation
@@ -580,6 +677,26 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
               "input_len * (1 + range_ratio)]."),
     )
 
+    lora_group = parser.add_argument_group("lora options")
+    lora_group.add_argument(
+        "--lora-skew",
+        type=float,
+        default=None,
+        help="LoRA 倾斜度",
+    )
+    lora_group.add_argument(
+        "--lora1-name",
+        type=str,
+        default=None,
+        help="第一个 LoRA 的名称，需要与服务器启动时 --lora-modules 中的名称一致",
+    )
+    lora_group.add_argument(
+        "--lora2-name",
+        type=str,
+        default=None,
+        help="第二个 LoRA 的名称，需要与服务器启动时 --lora-modules 中的名称一致",
+    )
+
     hf_group = parser.add_argument_group("hf dataset options")
     hf_group.add_argument("--hf-subset",
                           type=str,
@@ -714,6 +831,9 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
                 range_ratio=args.random_range_ratio,
+                lora_skew=args.lora_skew,
+                lora1_name=args.lora1_name,
+                lora2_name=args.lora2_name,
             ),
         }
 

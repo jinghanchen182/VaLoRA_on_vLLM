@@ -485,7 +485,10 @@ async def benchmark(
             request.multi_modal_data,
         )
         req_model_id, req_model_name = model_id, model_name
-        if lora_modules:
+        # 优先使用 request.lora_name，如果没有则使用 lora_modules 参数
+        if hasattr(request, 'lora_name') and request.lora_name:
+            req_model_id, req_model_name = request.lora_name, request.lora_name
+        elif lora_modules:
             req_lora_module = next(lora_modules)
             req_model_id, req_model_name = req_lora_module, req_lora_module
 
