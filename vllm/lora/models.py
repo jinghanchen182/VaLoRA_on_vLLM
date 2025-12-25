@@ -3,6 +3,7 @@
 
 import math
 import os
+import time
 from collections.abc import Sequence
 from typing import Any, Callable, Optional, Union
 
@@ -512,9 +513,9 @@ class LoRAModelManager(AdapterModelManager):
             
             # 调用atmm算子（这里使用scale=1.0，因为会在后面的add_中应用scale）
             a_scaling_ones = torch.ones(num_loras, device=device, dtype=dtype)
-            logger.info(f"lora_b_stacked.shape: {lora_b_stacked.shape}")
-            logger.info(f"lora_a.shape: {lora_a.shape}")
-            logger.info(f"temp_result.shape: {temp_result.shape}")
+            # logger.info(f"lora_b_stacked.shape: {lora_b_stacked.shape}")
+            # logger.info(f"lora_a.shape: {lora_a.shape}")
+            # logger.info(f"temp_result.shape: {temp_result.shape}")
             dispatch_sgmm(
                 temp_result,  # 输出 [M, N]
                 lora_a.contiguous(),  # 输入 [M, rank]
@@ -529,9 +530,9 @@ class LoRAModelManager(AdapterModelManager):
             output.add_(temp_result.T, alpha=scale)
         else:
             # 对于embedding层：直接累加 output[M, N] += lora_a @ lora_b
-            logger.info(f"lora_b_stacked.shape: {lora_b_stacked.shape}")
-            logger.info(f"lora_a.shape: {lora_a.shape}")
-            logger.info(f"output.shape: {output.shape}")
+            # logger.info(f"lora_b_stacked.shape: {lora_b_stacked.shape}")
+            # logger.info(f"lora_a.shape: {lora_a.shape}")
+            # logger.info(f"output.shape: {output.shape}")
             dispatch_sgmm(
                 output,  # 直接写入输出 [M, N]
                 lora_a.contiguous(),  # 输入 [M, rank]
@@ -557,8 +558,9 @@ class LoRAModelManager(AdapterModelManager):
             return False
         
         lora_model = self._registered_adapters[lora_id]
-        logger.info(f"Merging LoRA {lora_id} into base model weights")
+        # logger.info(f"Merging LoRA {lora_id} into base model weights")
         
+        time1 = time.time()
         # 遍历所有模块，将lora权重合并到基础权重
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
@@ -570,55 +572,104 @@ class LoRAModelManager(AdapterModelManager):
             if not hasattr(base_layer, 'weight'):
                 continue
             
-            # 跳过packed layers，因为它们对应多个子层，需要单独处理
+            # 处理packed layers（如qkv_proj，gate_up_proj等）
             if module_lora.is_packed:
-                logger.debug(f"Skipping packed LoRA layer {module_name} for merge")
-                continue
-            
-            lora_a = module_lora.lora_a
-            lora_b = module_lora.lora_b
-            
-            # 将lora_a和lora_b移到与base_layer.weight相同的设备和dtype
-            if isinstance(lora_a, torch.Tensor) and isinstance(lora_b, torch.Tensor):
-                lora_a = lora_a.to(base_layer.weight.device, base_layer.weight.dtype)
-                lora_b = lora_b.to(base_layer.weight.device, base_layer.weight.dtype)
+                # 对于packed layer，lora_a和lora_b是列表
+                lora_a_list = module_lora.lora_a
+                lora_b_list = module_lora.lora_b
                 
-                # 判断是否是embedding层
-                is_embedding = isinstance(module, VocabParallelEmbeddingWithLoRA)
+                # 获取base_layer的output_sizes来确定如何分割权重
+                if not hasattr(base_layer, 'output_sizes'):
+                    logger.warning(f"Packed layer {module_name} does not have output_sizes attribute")
+                    continue
                 
-                if is_embedding:
-                    # 对于embedding层，weight格式是 [vocab_size, embedding_dim]
-                    # delta_w = lora_a @ lora_b = [vocab_size, rank] @ [rank, embedding_dim] = [vocab_size, embedding_dim]
-                    # 只更新对应的vocab部分（lora_a的vocab_size可能小于base_layer的vocab_size）
-                    vocab_size = min(lora_a.shape[0], base_layer.weight.shape[0])
+                output_sizes = base_layer.output_sizes
+                n_slices = len(output_sizes)
+                
+                if len(lora_a_list) != n_slices or len(lora_b_list) != n_slices:
+                    logger.warning(f"LoRA list length mismatch for {module_name}: "
+                                 f"lora_a={len(lora_a_list)}, lora_b={len(lora_b_list)}, "
+                                 f"expected={n_slices}")
+                    continue
+                
+                # 计算每个切片的起始位置
+                output_start_idx = 0
+                for i, output_size in enumerate(output_sizes):
+                    lora_a = lora_a_list[i]
+                    lora_b = lora_b_list[i]
+                    
+                    # 如果这个子层没有LoRA，跳过
+                    if lora_a is None or lora_b is None:
+                        output_start_idx += output_size
+                        continue
+                    
+                    # 将lora_a和lora_b移到与base_layer.weight相同的设备和dtype
+                    lora_a = lora_a.to(base_layer.weight.device, base_layer.weight.dtype)
+                    lora_b = lora_b.to(base_layer.weight.device, base_layer.weight.dtype)
+                    
+                    # 获取当前切片的权重部分
+                    output_end_idx = output_start_idx + output_size
+                    weight_slice = base_layer.weight.data[output_start_idx:output_end_idx, :]
+                    
+                    # 合并LoRA权重到这个切片
                     if HAS_ATMM:
-                        # 直接在base_layer.weight.data上累加
                         self._matmul_with_atmm(
-                            base_layer.weight.data[:vocab_size],
-                            lora_a[:vocab_size], 
-                            lora_b, 
-                            transpose_result=False
-                        )
-                    else:
-                        delta_w = lora_a[:vocab_size] @ lora_b
-                        base_layer.weight.data[:vocab_size] += delta_w
-                    logger.debug(f"Merged LoRA weights for embedding module {module_name}")
-                else:
-                    # 对于线性层，weight格式是 [out_features, in_features]
-                    # delta_w = (lora_a @ lora_b).T = ([in_features, rank] @ [rank, out_features]).T = [out_features, in_features]
-                    if HAS_ATMM:
-                        # 直接在base_layer.weight.data上累加
-                        self._matmul_with_atmm(
-                            base_layer.weight.data,
-                            lora_a, 
-                            lora_b, 
+                            weight_slice,
+                            lora_a,
+                            lora_b,
                             transpose_result=True
                         )
                     else:
                         delta_w = (lora_a @ lora_b).T
-                        base_layer.weight.data += delta_w
-                    logger.debug(f"Merged LoRA weights for linear module {module_name}")
+                        weight_slice += delta_w
+                    
+                    output_start_idx = output_end_idx
+
+            else:
+                # 非packed layer的处理逻辑
+                lora_a = module_lora.lora_a
+                lora_b = module_lora.lora_b
+                
+                # 将lora_a和lora_b移到与base_layer.weight相同的设备和dtype
+                if isinstance(lora_a, torch.Tensor) and isinstance(lora_b, torch.Tensor):
+                    lora_a = lora_a.to(base_layer.weight.device, base_layer.weight.dtype)
+                    lora_b = lora_b.to(base_layer.weight.device, base_layer.weight.dtype)
+                    
+                    # 判断是否是embedding层
+                    is_embedding = isinstance(module, VocabParallelEmbeddingWithLoRA)
+                    
+                    if is_embedding:
+                        # 对于embedding层，weight格式是 [vocab_size, embedding_dim]
+                        # delta_w = lora_a @ lora_b = [vocab_size, rank] @ [rank, embedding_dim] = [vocab_size, embedding_dim]
+                        # 只更新对应的vocab部分（lora_a的vocab_size可能小于base_layer的vocab_size）
+                        vocab_size = min(lora_a.shape[0], base_layer.weight.shape[0])
+                        if HAS_ATMM:
+                            # 直接在base_layer.weight.data上累加
+                            self._matmul_with_atmm(
+                                base_layer.weight.data[:vocab_size],
+                                lora_a[:vocab_size], 
+                                lora_b, 
+                                transpose_result=False
+                            )
+                        else:
+                            delta_w = lora_a[:vocab_size] @ lora_b
+                            base_layer.weight.data[:vocab_size] += delta_w
+                    else:
+                        # 对于线性层，weight格式是 [out_features, in_features]
+                        # delta_w = (lora_a @ lora_b).T = ([in_features, rank] @ [rank, out_features]).T = [out_features, in_features]
+                        if HAS_ATMM:
+                            self._matmul_with_atmm(
+                                base_layer.weight.data,
+                                lora_a, 
+                                lora_b, 
+                                transpose_result=True
+                            )
+                        else:
+                            delta_w = (lora_a @ lora_b).T
+                            base_layer.weight.data += delta_w
         
+        time2 = time.time()
+        logger.info(f"Merge LoRA {lora_id} time cost: {time2 - time1} seconds")
         return True
     
     def unmerge_lora(self, lora_id: int) -> bool:
@@ -635,7 +686,6 @@ class LoRAModelManager(AdapterModelManager):
             return False
         
         lora_model = self._registered_adapters[lora_id]
-        logger.info(f"Unmerging LoRA {lora_id} from base model weights")
         
         # 遍历所有模块，从基础权重中减去lora权重
         for module_name, module in self.modules.items():
@@ -648,56 +698,100 @@ class LoRAModelManager(AdapterModelManager):
             if not hasattr(base_layer, 'weight'):
                 continue
             
-            # 跳过packed layers，因为它们对应多个子层，需要单独处理
+            # 处理packed layers（如qkv_proj，gate_up_proj等）
             if module_lora.is_packed:
-                logger.debug(f"Skipping packed LoRA layer {module_name} for unmerge")
-                continue
-            
-            lora_a = module_lora.lora_a
-            lora_b = module_lora.lora_b
-            
-            # 将lora_a和lora_b移到与base_layer.weight相同的设备和dtype
-            if isinstance(lora_a, torch.Tensor) and isinstance(lora_b, torch.Tensor):
-                lora_a = lora_a.to(base_layer.weight.device, base_layer.weight.dtype)
-                lora_b = lora_b.to(base_layer.weight.device, base_layer.weight.dtype)
+                # 对于packed layer，lora_a和lora_b是列表
+                lora_a_list = module_lora.lora_a
+                lora_b_list = module_lora.lora_b
                 
-                # 判断是否是embedding层
-                is_embedding = isinstance(module, VocabParallelEmbeddingWithLoRA)
+                # 获取base_layer的output_sizes来确定如何分割权重
+                if not hasattr(base_layer, 'output_sizes'):
+                    logger.warning(f"Packed layer {module_name} does not have output_sizes attribute")
+                    continue
                 
-                if is_embedding:
-                    # 对于embedding层，weight格式是 [vocab_size, embedding_dim]
-                    # delta_w = lora_a @ lora_b = [vocab_size, rank] @ [rank, embedding_dim] = [vocab_size, embedding_dim]
-                    # 只更新对应的vocab部分（lora_a的vocab_size可能小于base_layer的vocab_size）
-                    vocab_size = min(lora_a.shape[0], base_layer.weight.shape[0])
+                output_sizes = base_layer.output_sizes
+                n_slices = len(output_sizes)
+                
+                if len(lora_a_list) != n_slices or len(lora_b_list) != n_slices:
+                    logger.warning(f"LoRA list length mismatch for {module_name}: "
+                                 f"lora_a={len(lora_a_list)}, lora_b={len(lora_b_list)}, "
+                                 f"expected={n_slices}")
+                    continue
+                
+                # 计算每个切片的起始位置
+                output_start_idx = 0
+                for i, output_size in enumerate(output_sizes):
+                    lora_a = lora_a_list[i]
+                    lora_b = lora_b_list[i]
+                    
+                    # 如果这个子层没有LoRA，跳过
+                    if lora_a is None or lora_b is None:
+                        output_start_idx += output_size
+                        continue
+                    
+                    # 将lora_a和lora_b移到与base_layer.weight相同的设备和dtype
+                    lora_a = lora_a.to(base_layer.weight.device, base_layer.weight.dtype)
+                    lora_b = lora_b.to(base_layer.weight.device, base_layer.weight.dtype)
+                    
+                    # 获取当前切片的权重部分
+                    output_end_idx = output_start_idx + output_size
+                    weight_slice = base_layer.weight.data[output_start_idx:output_end_idx, :]
+                    
+                    # 从这个切片中减去LoRA权重
                     if HAS_ATMM:
-                        # 直接在base_layer.weight.data上累减（使用scale=-1.0）
                         self._matmul_with_atmm(
-                            base_layer.weight.data[:vocab_size],
-                            lora_a[:vocab_size], 
-                            lora_b, 
-                            transpose_result=False,
-                            scale=-1.0
-                        )
-                    else:
-                        delta_w = lora_a[:vocab_size] @ lora_b
-                        base_layer.weight.data[:vocab_size] -= delta_w
-                    logger.debug(f"Unmerged LoRA weights for embedding module {module_name}")
-                else:
-                    # 对于线性层，weight格式是 [out_features, in_features]
-                    # delta_w = (lora_a @ lora_b).T = ([in_features, rank] @ [rank, out_features]).T = [out_features, in_features]
-                    if HAS_ATMM:
-                        # 直接在base_layer.weight.data上累减（使用scale=-1.0）
-                        self._matmul_with_atmm(
-                            base_layer.weight.data,
-                            lora_a, 
-                            lora_b, 
+                            weight_slice,
+                            lora_a,
+                            lora_b,
                             transpose_result=True,
                             scale=-1.0
                         )
                     else:
                         delta_w = (lora_a @ lora_b).T
-                        base_layer.weight.data -= delta_w
-                    logger.debug(f"Unmerged LoRA weights for linear module {module_name}")
+                        weight_slice -= delta_w
+                    
+                    output_start_idx = output_end_idx
+                
+            else:
+                # 非packed layer的处理逻辑
+                lora_a = module_lora.lora_a
+                lora_b = module_lora.lora_b
+                
+                # 将lora_a和lora_b移到与base_layer.weight相同的设备和dtype
+                if isinstance(lora_a, torch.Tensor) and isinstance(lora_b, torch.Tensor):
+                    lora_a = lora_a.to(base_layer.weight.device, base_layer.weight.dtype)
+                    lora_b = lora_b.to(base_layer.weight.device, base_layer.weight.dtype)
+                    
+                    # 判断是否是embedding层
+                    is_embedding = isinstance(module, VocabParallelEmbeddingWithLoRA)
+                    
+                    if is_embedding:
+                        # 对于embedding层，weight格式是 [vocab_size, embedding_dim]
+                        vocab_size = min(lora_a.shape[0], base_layer.weight.shape[0])
+                        if HAS_ATMM:
+                            self._matmul_with_atmm(
+                                base_layer.weight.data[:vocab_size],
+                                lora_a[:vocab_size], 
+                                lora_b, 
+                                transpose_result=False,
+                                scale=-1.0
+                            )
+                        else:
+                            delta_w = lora_a[:vocab_size] @ lora_b
+                            base_layer.weight.data[:vocab_size] -= delta_w
+                    else:
+                        # 对于线性层，weight格式是 [out_features, in_features]
+                        if HAS_ATMM:
+                            self._matmul_with_atmm(
+                                base_layer.weight.data,
+                                lora_a, 
+                                lora_b, 
+                                transpose_result=True,
+                                scale=-1.0
+                            )
+                        else:
+                            delta_w = (lora_a @ lora_b).T
+                            base_layer.weight.data -= delta_w
         
         return True
 
