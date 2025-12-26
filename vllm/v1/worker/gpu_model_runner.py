@@ -197,6 +197,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
+        
+        # 跟踪已merge的lora_id，用于在前向传播时跳过其计算
+        self.merged_lora_id: Optional[int] = None
 
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
@@ -424,27 +427,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 lora_id = scheduler_output.lora_id_to_unmerge
                 logger.info(f"Worker: unmerge lora_id {lora_id} from model weights")
                 self.lora_manager._adapter_manager.unmerge_lora(lora_id)
+                self.merged_lora_id = None
             
             # 如果需要merge新的lora
             if scheduler_output.lora_id_to_merge is not None:
                 lora_id = scheduler_output.lora_id_to_merge
                 logger.info(f"Worker: merge lora_id {lora_id} into model weights")
                 self.lora_manager._adapter_manager.merge_lora(lora_id)
-            
-            # 在merge模式下，将使用merge_lora_id的请求的lora_request设置为None
-            # 因为它们的lora权重已经merge到基础模型中，不需要执行额外的lora计算
-            if scheduler_output.merge_mode == "merge" and \
-               scheduler_output.lora_id_to_merge is not None:
-                merge_lora_id = scheduler_output.lora_id_to_merge
-                for req_id in scheduler_output.num_scheduled_tokens.keys():
-                    if req_id in self.requests:
-                        req = self.requests[req_id]
-                        if req.lora_request is not None and \
-                           req.lora_request.lora_int_id == merge_lora_id:
-                            # 临时将lora_request设置为None，避免执行额外的lora计算
-                            logger.debug(f"Skip lora computation for request {req_id} "
-                                       f"with merged lora_id {merge_lora_id}")
-                            req.lora_request = None
+                # 保存已merge的lora_id，后续在_prepare_inputs中使用
+                self.merged_lora_id = lora_id            
         
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
@@ -1621,6 +1612,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         a_len = torch.full((num_loras,), rank, device=self.device, dtype=torch.long)
         a_loc = torch.arange(0, num_loras * rank, device=self.device, dtype=torch.long)
         a_scaling = torch.full((num_loras,), 1.0, device=self.device, dtype=self.model_config.dtype)
+        
+        # 如果有已merge的lora，将a_scaling设置为None，避免重复计算
+        if self.merged_lora_id is not None:
+            # logger.info(f"Set a_scaling to None")
+            a_scaling = None
+        
         N0 = 32 * 4096
         tmp_d = torch.zeros(N0 * 60, dtype=torch.int8, device=self.device)
 
@@ -2351,6 +2348,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             a_len = torch.full((num_loras,), rank, device=self.device, dtype=torch.long)
             a_loc = torch.arange(0, num_loras * rank, device=self.device, dtype=torch.long)
             a_scaling = torch.full((num_loras,), 1.0, device=self.device, dtype=self.model_config.dtype)
+            
+            # 如果有已merge的lora，将a_scaling设置为None，避免重复计算
+            if self.merged_lora_id is not None:
+                logger.info(f"Set a_scaling to None")
+                a_scaling = None
+            
             N0 = 32 * 4096
             tmp_d = torch.zeros(N0 * 60, dtype=torch.int8, device=self.device)
 

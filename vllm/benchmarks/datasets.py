@@ -373,7 +373,8 @@ class RandomDataset(BenchmarkDataset):
             # 创建 LoRA 名称列表：前 num_lora1 个使用 lora1，其余使用 lora2
             lora_names_list = [lora1_name] * num_lora1 + [lora2_name] * num_lora2
             # 打乱 lora 名称的顺序，使其随机分布
-            random.shuffle(lora_names_list)
+            # random.shuffle(lora_names_list)
+            print(f"lora_names_list: {lora_names_list}")
 
         requests = []
         for i in range(num_requests):

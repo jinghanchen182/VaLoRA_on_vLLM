@@ -227,7 +227,7 @@ class Scheduler(SchedulerInterface):
         for lora_id, count in waiting_lora_id_counts.items():
             all_lora_id_counts[lora_id] = all_lora_id_counts.get(lora_id, 0) + count
         
-        logger.info(f"lora_id_counts: {all_lora_id_counts}, current_merged_lora_id: {self.current_merged_lora_id}")
+        # logger.info(f"lora_id_counts: {all_lora_id_counts}, current_merged_lora_id: {self.current_merged_lora_id}")
         
         merge_lora_id = None
         lora_id_to_unmerge = None
@@ -242,7 +242,7 @@ class Scheduler(SchedulerInterface):
             # 只有一个lora_id，直接使用它
             merge_lora_id = list(all_lora_id_counts.keys())[0]
             self.merge_mode = "merge"
-            logger.info(f"单一lora_id，进入merge模式: {merge_lora_id}")
+            # logger.info(f"单一lora_id，进入merge模式: {merge_lora_id}")
         elif len(all_lora_id_counts) > 1:
             # 多个lora_id，检查是否有某个超过一半
             total_reqs = sum(all_lora_id_counts.values())
@@ -250,7 +250,7 @@ class Scheduler(SchedulerInterface):
                 if count > total_reqs / 2:
                     merge_lora_id = lora_id
                     self.merge_mode = "merge"
-                    logger.info(f"lora_id {merge_lora_id} 请求数超过一半，进入merge模式")
+                    # logger.info(f"lora_id {merge_lora_id} 请求数超过一半，进入merge模式")
                     break
             else:
                 # 没有lora_id超过一半，使用unmerge模式
@@ -261,7 +261,7 @@ class Scheduler(SchedulerInterface):
             if self.current_merged_lora_id is not None:
                 self.merge_mode = "merge"
                 merge_lora_id = self.current_merged_lora_id
-                logger.info(f"没有新请求，保持merge模式，当前merged lora_id: {merge_lora_id}")
+                # logger.info(f"没有新请求，保持merge模式，当前merged lora_id: {merge_lora_id}")
             else:
                 self.merge_mode = "unmerge"
         
@@ -271,19 +271,19 @@ class Scheduler(SchedulerInterface):
             if self.current_merged_lora_id is not None and \
                self.current_merged_lora_id != merge_lora_id:
                 lora_id_to_unmerge = self.current_merged_lora_id
-                logger.info(f"需要unmerge lora_id: {lora_id_to_unmerge}")
+                # logger.info(f"需要unmerge lora_id: {lora_id_to_unmerge}")
             
             # 如果新的merge_lora_id还没有merge到模型，需要merge
             if self.current_merged_lora_id != merge_lora_id:
                 lora_id_to_merge = merge_lora_id
-                logger.info(f"需要merge lora_id: {lora_id_to_merge}")
+                # logger.info(f"需要merge lora_id: {lora_id_to_merge}")
                 # 更新当前merged的lora_id
                 self.current_merged_lora_id = merge_lora_id
         elif self.merge_mode == "unmerge":
             # 如果切换到unmerge模式，但当前有merge的lora，需要unmerge
             if self.current_merged_lora_id is not None:
                 lora_id_to_unmerge = self.current_merged_lora_id
-                logger.info(f"切换到unmerge模式，需要unmerge lora_id: {lora_id_to_unmerge}")
+                # logger.info(f"切换到unmerge模式，需要unmerge lora_id: {lora_id_to_unmerge}")
                 self.current_merged_lora_id = None
                 
         # First, schedule the RUNNING requests.

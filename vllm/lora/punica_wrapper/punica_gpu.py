@@ -81,7 +81,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
         """
-        # print("ATMM shrink!!!!!!")
         x = x.view(-1, x.shape[-1])
         lora_shrink(
             x,
@@ -613,22 +612,24 @@ class AtmmWrapperGPU(PunicaWrapperBase):
                 dtype=x.dtype,
                 device=x.device,
             )
-        self.add_shrink(
-            buffer,  # type: ignore
-            x,
-            lora_a_stacked,
-            scale,
-            a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d,
-            **kwargs)
-        self.add_expand(
-            y,
-            buffer,  # type: ignore
-            lora_b_stacked,
-            None,
-            output_slices,
-            a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d,
-            add_inputs=True,
-            **kwargs)
+        # 判断a_scaling是否为None，如果为None，则不进行shrink和expand
+        if a_scaling is not None:
+            self.add_shrink(
+                buffer,  # type: ignore
+                x,
+                lora_a_stacked,
+                scale,
+                a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d,
+                **kwargs)
+            self.add_expand(
+                y,
+                buffer,  # type: ignore
+                lora_b_stacked,
+                None,
+                output_slices,
+                a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d,
+                add_inputs=True,
+                **kwargs)
 
     def add_lora_logits(self,
                         y: torch.Tensor,
