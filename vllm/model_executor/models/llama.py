@@ -378,8 +378,13 @@ class LlamaModel(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
+    def get_input_embeddings(self, input_ids: torch.Tensor,
+                             a_start: Optional[torch.Tensor] = None,
+                             a_len: Optional[torch.Tensor] = None,
+                             a_loc: Optional[torch.Tensor] = None,
+                             a_scaling: Optional[torch.Tensor] = None,
+                             tmp_d: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return self.embed_tokens(input_ids, a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
 
     def forward(
         self,
@@ -399,7 +404,8 @@ class LlamaModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.get_input_embeddings(input_ids,
+                                a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -618,9 +624,22 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(
+            self.lm_head, 
+            hidden_states, 
+            sampling_metadata,
+            a_start=a_start,
+            a_len=a_len,
+            a_loc=a_loc,
+            a_scaling=a_scaling,
+            tmp_d=tmp_d
+        )
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

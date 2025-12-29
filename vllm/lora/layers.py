@@ -238,7 +238,12 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 assert self.embeddings_weights is not None
                 self.embeddings_weights[:embeddings.shape[0]].copy_(embeddings)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor,
+                a_start: Optional[torch.Tensor] = None,
+                a_len: Optional[torch.Tensor] = None,
+                a_loc: Optional[torch.Tensor] = None,
+                a_scaling: Optional[torch.Tensor] = None,
+                tmp_d: Optional[torch.Tensor] = None) -> torch.Tensor:
         added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1,
                                         1, 0)
 
@@ -271,7 +276,12 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 full_output,
                 full_lora_a_embeddings,
                 self.lora_b_stacked,
-                add_input=True)
+                add_input=True,
+                a_start=a_start,
+                a_len=a_len,
+                a_loc=a_loc,
+                a_scaling=a_scaling,
+                tmp_d=tmp_d)
 
         if not current_platform.can_update_inplace():
             full_output = lora_output
@@ -1136,6 +1146,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         hidden_states: torch.Tensor,
         lm_head: VocabParallelEmbedding,
         embedding_bias: Optional[torch.Tensor] = None,
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
         logits = lm_head.quant_method.apply(lm_head, hidden_states)
@@ -1202,7 +1217,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         lora_output: Optional[
             torch.Tensor] = self.punica_wrapper.add_lora_logits(
                 logits, hidden_states, self.lora_a_stacked,
-                self.lora_b_stacked, 1.0)
+                self.lora_b_stacked, 1.0, 
+                a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
 
         if not current_platform.can_update_inplace():
             logits = lora_output

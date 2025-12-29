@@ -1674,7 +1674,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                   num_scheduled_tokens_np, kv_connector_output)
 
             sample_hidden_states = hidden_states[logits_indices]
-            logits = self.model.compute_logits(sample_hidden_states, None)
+            logits = self.model.compute_logits(sample_hidden_states, None,
+                a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
         if broadcast_pp_output:
             model_output_broadcast_data = {
                 "logits": logits.contiguous(),
@@ -2408,7 +2409,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # To avoid breaking the sampler, we use a random tensor here instead.
         hidden_states = torch.rand_like(hidden_states)
 
-        logits = self.model.compute_logits(hidden_states, None)
+        num_loras = self.lora_manager._adapter_manager.lora_slots
+        rank = 16
+        a_start = torch.arange(0, num_loras * rank, step=rank, device=self.device, dtype=torch.long)
+        a_len = torch.full((num_loras,), rank, device=self.device, dtype=torch.long)
+        a_loc = torch.arange(0, num_loras * rank, device=self.device, dtype=torch.long)
+        a_scaling = torch.full((num_loras,), 1.0, device=self.device, dtype=self.model_config.dtype)
+        
+        # 如果有已merge的lora，将a_scaling设置为None，避免重复计算
+        if self.merged_lora_id is not None:
+            logger.info(f"Set a_scaling to None")
+            a_scaling = None
+        
+        N0 = 32 * 4096
+        tmp_d = torch.zeros(N0 * 60, dtype=torch.int8, device=self.device)
+
+        logits = self.model.compute_logits(hidden_states, None, 
+                                        a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
         num_reqs = logits.size(0)
 
         dummy_tensors = lambda v: torch.full(

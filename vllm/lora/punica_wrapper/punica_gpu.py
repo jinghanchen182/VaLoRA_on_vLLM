@@ -436,7 +436,6 @@ class AtmmWrapperGPU(PunicaWrapperBase):
                    lora_b_stacked: tuple[torch.Tensor, ...],
                    lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
                    output_slices: tuple[int, ...],
-                   offset_start: int = 0,
                    a_start: Optional[torch.Tensor] = None,
                    a_len: Optional[torch.Tensor] = None,
                    a_loc: Optional[torch.Tensor] = None,
@@ -529,6 +528,11 @@ class AtmmWrapperGPU(PunicaWrapperBase):
                            x: torch.Tensor,
                            lora_b_stacked: torch.Tensor,
                            add_inputs: bool = True,
+                           a_start: Optional[torch.Tensor] = None,
+                           a_len: Optional[torch.Tensor] = None,
+                           a_loc: Optional[torch.Tensor] = None,
+                           a_scaling: Optional[torch.Tensor] = None,
+                           tmp_d: Optional[torch.Tensor] = None,
                            **kwargs) -> None:
         """
         Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
@@ -542,15 +546,17 @@ class AtmmWrapperGPU(PunicaWrapperBase):
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
         """
-
-        lora_expand(
-            x.unsqueeze(dim=0),
-            (lora_b_stacked, ),
-            y,
-            *self.token_mapping_meta.meta_args(x.size(0)),
-            offset_start=0,
-            add_inputs=add_inputs,
-        )
+        if a_scaling is not None:
+            self.add_expand(
+                y,
+                x.unsqueeze(dim=0),
+                (lora_b_stacked, ),
+                None,
+                (y.shape[-1],),  # output_slices
+                a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d,
+                add_inputs=add_inputs,
+                **kwargs
+            )
 
     def add_lora_linear(self,
                         y: torch.Tensor,
@@ -630,6 +636,8 @@ class AtmmWrapperGPU(PunicaWrapperBase):
                 a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d,
                 add_inputs=True,
                 **kwargs)
+        # else:
+        #     logger.info("a_scaling is None")
 
     def add_lora_logits(self,
                         y: torch.Tensor,
@@ -637,6 +645,11 @@ class AtmmWrapperGPU(PunicaWrapperBase):
                         lora_a_stacked: torch.Tensor,
                         lora_b_stacked: torch.Tensor,
                         scale,
+                        a_start: Optional[torch.Tensor] = None,
+                        a_len: Optional[torch.Tensor] = None,
+                        a_loc: Optional[torch.Tensor] = None,
+                        a_scaling: Optional[torch.Tensor] = None,
+                        tmp_d: Optional[torch.Tensor] = None,
                         *,
                         buffer: Optional[torch.Tensor] = None,
                         **kwargs) -> None:
@@ -665,12 +678,26 @@ class AtmmWrapperGPU(PunicaWrapperBase):
             buffer = torch.zeros((x.size(0), r),
                                  dtype=torch.float32,
                                  device=x.device)
+        
+        # 使用atmm的shrink和expand方法
+        if a_scaling is not None:
+            self.add_shrink(
+                buffer.unsqueeze(dim=0),
+                x,
+                [lora_a_stacked],
+                scale,
+                a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d,
+                **kwargs
+            )
 
-        lora_shrink(x, [lora_a_stacked], buffer.unsqueeze(dim=0),
-                    *self.prompt_mapping_meta.meta_args(x.size(0)), scale)
-
-        lora_expand(buffer.unsqueeze(dim=0), [lora_b_stacked],
-                    y,
-                    *self.prompt_mapping_meta.meta_args(buffer.size(0)),
-                    add_inputs=True)
+            self.add_expand(
+                y,
+                buffer.unsqueeze(dim=0).half(),
+                [lora_b_stacked],
+                None,
+                (y.shape[-1],),  # output_slices
+                a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d,
+                add_inputs=True,
+                **kwargs
+            )  
         y = y.view_as(y_org)

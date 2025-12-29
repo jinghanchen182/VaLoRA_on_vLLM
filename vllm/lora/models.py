@@ -558,7 +558,6 @@ class LoRAModelManager(AdapterModelManager):
             return False
         
         lora_model = self._registered_adapters[lora_id]
-        # logger.info(f"Merging LoRA {lora_id} into base model weights")
         
         time1 = time.time()
         # 遍历所有模块，将lora权重合并到基础权重
@@ -580,7 +579,6 @@ class LoRAModelManager(AdapterModelManager):
                 
                 # 获取base_layer的output_sizes来确定如何分割权重
                 if not hasattr(base_layer, 'output_sizes'):
-                    logger.warning(f"Packed layer {module_name} does not have output_sizes attribute")
                     continue
                 
                 output_sizes = base_layer.output_sizes
@@ -636,37 +634,36 @@ class LoRAModelManager(AdapterModelManager):
                     lora_b = lora_b.to(base_layer.weight.device, base_layer.weight.dtype)
                     
                     # 判断是否是embedding层
-                    is_embedding = isinstance(module, VocabParallelEmbeddingWithLoRA)
-                    
-                    if is_embedding:
-                        # 对于embedding层，weight格式是 [vocab_size, embedding_dim]
-                        # delta_w = lora_a @ lora_b = [vocab_size, rank] @ [rank, embedding_dim] = [vocab_size, embedding_dim]
-                        # 只更新对应的vocab部分（lora_a的vocab_size可能小于base_layer的vocab_size）
-                        vocab_size = min(lora_a.shape[0], base_layer.weight.shape[0])
-                        if HAS_ATMM:
-                            # 直接在base_layer.weight.data上累加
-                            self._matmul_with_atmm(
-                                base_layer.weight.data[:vocab_size],
-                                lora_a[:vocab_size], 
-                                lora_b, 
-                                transpose_result=False
-                            )
-                        else:
-                            delta_w = lora_a[:vocab_size] @ lora_b
-                            base_layer.weight.data[:vocab_size] += delta_w
+                    # is_embedding = isinstance(module, VocabParallelEmbeddingWithLoRA)
+                    # if is_embedding:
+                    #     # 对于embedding层，weight格式是 [vocab_size, embedding_dim]
+                    #     # delta_w = lora_a @ lora_b = [vocab_size, rank] @ [rank, embedding_dim] = [vocab_size, embedding_dim]
+                    #     # 只更新对应的vocab部分（lora_a的vocab_size可能小于base_layer的vocab_size）
+                    #     vocab_size = min(lora_a.shape[0], base_layer.weight.shape[0])
+                    #     if HAS_ATMM:
+                    #         # 直接在base_layer.weight.data上累加
+                    #         self._matmul_with_atmm(
+                    #             base_layer.weight.data[:vocab_size],
+                    #             lora_a[:vocab_size], 
+                    #             lora_b, 
+                    #             transpose_result=False
+                    #         )
+                    #     else:
+                    #         delta_w = lora_a[:vocab_size] @ lora_b
+                    #         base_layer.weight.data[:vocab_size] += delta_w
+                    # else:
+                    # 对于线性层，weight格式是 [out_features, in_features]
+                    # delta_w = (lora_a @ lora_b).T = ([in_features, rank] @ [rank, out_features]).T = [out_features, in_features]
+                    if HAS_ATMM:
+                        self._matmul_with_atmm(
+                            base_layer.weight.data,
+                            lora_a, 
+                            lora_b, 
+                            transpose_result=True
+                        )
                     else:
-                        # 对于线性层，weight格式是 [out_features, in_features]
-                        # delta_w = (lora_a @ lora_b).T = ([in_features, rank] @ [rank, out_features]).T = [out_features, in_features]
-                        if HAS_ATMM:
-                            self._matmul_with_atmm(
-                                base_layer.weight.data,
-                                lora_a, 
-                                lora_b, 
-                                transpose_result=True
-                            )
-                        else:
-                            delta_w = (lora_a @ lora_b).T
-                            base_layer.weight.data += delta_w
+                        delta_w = (lora_a @ lora_b).T
+                        base_layer.weight.data += delta_w
         
         time2 = time.time()
         logger.info(f"Merge LoRA {lora_id} time cost: {time2 - time1} seconds")
@@ -706,7 +703,6 @@ class LoRAModelManager(AdapterModelManager):
                 
                 # 获取base_layer的output_sizes来确定如何分割权重
                 if not hasattr(base_layer, 'output_sizes'):
-                    logger.warning(f"Packed layer {module_name} does not have output_sizes attribute")
                     continue
                 
                 output_sizes = base_layer.output_sizes
@@ -763,35 +759,34 @@ class LoRAModelManager(AdapterModelManager):
                     lora_b = lora_b.to(base_layer.weight.device, base_layer.weight.dtype)
                     
                     # 判断是否是embedding层
-                    is_embedding = isinstance(module, VocabParallelEmbeddingWithLoRA)
-                    
-                    if is_embedding:
-                        # 对于embedding层，weight格式是 [vocab_size, embedding_dim]
-                        vocab_size = min(lora_a.shape[0], base_layer.weight.shape[0])
-                        if HAS_ATMM:
-                            self._matmul_with_atmm(
-                                base_layer.weight.data[:vocab_size],
-                                lora_a[:vocab_size], 
-                                lora_b, 
-                                transpose_result=False,
-                                scale=-1.0
-                            )
-                        else:
-                            delta_w = lora_a[:vocab_size] @ lora_b
-                            base_layer.weight.data[:vocab_size] -= delta_w
+                    # is_embedding = isinstance(module, VocabParallelEmbeddingWithLoRA)
+                    # if is_embedding:
+                    #     # 对于embedding层，weight格式是 [vocab_size, embedding_dim]
+                    #     vocab_size = min(lora_a.shape[0], base_layer.weight.shape[0])
+                    #     if HAS_ATMM:
+                    #         self._matmul_with_atmm(
+                    #             base_layer.weight.data[:vocab_size],
+                    #             lora_a[:vocab_size], 
+                    #             lora_b, 
+                    #             transpose_result=False,
+                    #             scale=-1.0
+                    #         )
+                    #     else:
+                    #         delta_w = lora_a[:vocab_size] @ lora_b
+                    #         base_layer.weight.data[:vocab_size] -= delta_w
+                    # else:
+                    # 对于线性层，weight格式是 [out_features, in_features]
+                    if HAS_ATMM:
+                        self._matmul_with_atmm(
+                            base_layer.weight.data,
+                            lora_a, 
+                            lora_b, 
+                            transpose_result=True,
+                            scale=-1.0
+                        )
                     else:
-                        # 对于线性层，weight格式是 [out_features, in_features]
-                        if HAS_ATMM:
-                            self._matmul_with_atmm(
-                                base_layer.weight.data,
-                                lora_a, 
-                                lora_b, 
-                                transpose_result=True,
-                                scale=-1.0
-                            )
-                        else:
-                            delta_w = (lora_a @ lora_b).T
-                            base_layer.weight.data -= delta_w
+                        delta_w = (lora_a @ lora_b).T
+                        base_layer.weight.data -= delta_w
         
         return True
 

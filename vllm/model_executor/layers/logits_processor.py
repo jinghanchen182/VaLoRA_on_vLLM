@@ -60,6 +60,11 @@ class LogitsProcessor(nn.Module):
         sampling_metadata: Optional[SamplingMetadata] = None,
         embedding_bias: Optional[torch.Tensor] = None,
         prune_hidden_states: bool = True,
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         if self.logits_as_input:
             logits = hidden_states
@@ -69,7 +74,8 @@ class LogitsProcessor(nn.Module):
                                                      sampling_metadata)
 
             # Get the logits for the next tokens.
-            logits = self._get_logits(hidden_states, lm_head, embedding_bias)
+            logits = self._get_logits(hidden_states, lm_head, embedding_bias,
+                                      a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
         if logits is not None:
             if self.soft_cap is not None:
                 logits = logits / self.soft_cap

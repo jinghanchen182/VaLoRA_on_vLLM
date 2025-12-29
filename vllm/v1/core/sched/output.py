@@ -161,5 +161,3 @@ class SchedulerOutput:
     lora_id_to_unmerge: Optional[int] = None
     # 需要加到模型权重中的lora_id (merge操作)
     lora_id_to_merge: Optional[int] = None
-    # 当前的merge模式: "merge" 或 "unmerge"
-    merge_mode: str = "unmerge"

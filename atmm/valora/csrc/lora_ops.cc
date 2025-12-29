@@ -93,7 +93,7 @@ inline bool launch_bgmv_kernel(T* Y, const T* X, const T* W,
     break;
 #define CASE(_T, narrow, wide,tx,ty,tz,wx,wy,wz)  \
     CASE_ONESIDE(T, wide, narrow,tx,ty,tz,wx,wy,wz) \
-    CASE_ONESIDE(T, narrow, wide,tx,ty,tz,wx,wy,wz) //\
+    CASE_ONESIDE(T, narrow, wide,tx,ty,tz,wx,wy,wz) \
 //  CASE_ONESIDE(T, wide, narrow,tx,ty,tz,wx,wy,wz)
 
     FOR_BGMV_WIDE_NARROW(CASE, _)

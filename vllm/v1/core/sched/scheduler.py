@@ -202,6 +202,10 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        merge_lora_id = None
+        lora_id_to_unmerge = None
+        lora_id_to_merge = None
+
         # 统计running队列的lora id
         running_lora_id_counts = {}
         for req in self.running:
@@ -228,10 +232,6 @@ class Scheduler(SchedulerInterface):
             all_lora_id_counts[lora_id] = all_lora_id_counts.get(lora_id, 0) + count
         
         # logger.info(f"lora_id_counts: {all_lora_id_counts}, current_merged_lora_id: {self.current_merged_lora_id}")
-        
-        merge_lora_id = None
-        lora_id_to_unmerge = None
-        lora_id_to_merge = None
         
         # 判断是否应该进入merge模式
         # 1. 如果所有请求的lora id相同且只有一个lora_id
@@ -691,8 +691,7 @@ class Scheduler(SchedulerInterface):
             grammar_bitmask=grammar_bitmask,
             # LoRA merge相关信息
             lora_id_to_unmerge=lora_id_to_unmerge,
-            lora_id_to_merge=lora_id_to_merge,
-            merge_mode=self.merge_mode,
+            lora_id_to_merge=lora_id_to_merge
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
