@@ -205,86 +205,88 @@ class Scheduler(SchedulerInterface):
         merge_lora_id = None
         lora_id_to_unmerge = None
         lora_id_to_merge = None
-
-        # 统计running队列的lora id
-        running_lora_id_counts = {}
-        for req in self.running:
-            lora_req = getattr(req, "lora_request", None)
-            if lora_req is not None:
-                lora_id = getattr(lora_req, "lora_int_id", None)
-                if lora_id is not None:
-                    running_lora_id_counts[lora_id] = running_lora_id_counts.get(lora_id, 0) + 1
         
-        # 统计waiting队列的lora id
-        waiting_lora_id_counts = {}
-        for req in self.waiting:
-            lora_req = getattr(req, "lora_request", None)
-            if lora_req is not None:
-                lora_id = getattr(lora_req, "lora_int_id", None)
-                if lora_id is not None:
-                    waiting_lora_id_counts[lora_id] = waiting_lora_id_counts.get(lora_id, 0) + 1
-        
-        # 合并所有请求的lora id统计
-        all_lora_id_counts = {}
-        for lora_id, count in running_lora_id_counts.items():
-            all_lora_id_counts[lora_id] = all_lora_id_counts.get(lora_id, 0) + count
-        for lora_id, count in waiting_lora_id_counts.items():
-            all_lora_id_counts[lora_id] = all_lora_id_counts.get(lora_id, 0) + count
-        
-        # logger.info(f"lora_id_counts: {all_lora_id_counts}, current_merged_lora_id: {self.current_merged_lora_id}")
-        
-        # 判断是否应该进入merge模式
-        # 1. 如果所有请求的lora id相同且只有一个lora_id
-        # 2. 或者某个lora_id的请求数超过一半
-        if len(running_lora_id_counts) > 1:
-            self.merge_mode = "unmerge"
-        elif len(all_lora_id_counts) == 1:
-            # 只有一个lora_id，直接使用它
-            merge_lora_id = list(all_lora_id_counts.keys())[0]
-            self.merge_mode = "merge"
-            # logger.info(f"单一lora_id，进入merge模式: {merge_lora_id}")
-        elif len(all_lora_id_counts) > 1:
-            # 多个lora_id，检查是否有某个超过一半
-            total_reqs = sum(all_lora_id_counts.values())
-            for lora_id, count in all_lora_id_counts.items():
-                if count > total_reqs / 2:
-                    merge_lora_id = lora_id
-                    self.merge_mode = "merge"
-                    # logger.info(f"lora_id {merge_lora_id} 请求数超过一半，进入merge模式")
-                    break
-            else:
-                # 没有lora_id超过一半，使用unmerge模式
-                self.merge_mode = "unmerge"
-        else:
-            # 没有请求（lora_id_counts为空）
-            # 如果当前已经merge了某个lora，保持merge模式，不切换到unmerge
-            if self.current_merged_lora_id is not None:
-                self.merge_mode = "merge"
-                merge_lora_id = self.current_merged_lora_id
-                # logger.info(f"没有新请求，保持merge模式，当前merged lora_id: {merge_lora_id}")
-            else:
-                self.merge_mode = "unmerge"
-        
-        # 处理merge模式下的lora权重管理
-        if self.merge_mode == "merge" and merge_lora_id is not None:
-            # 如果当前已经merge了其他lora，需要先unmerge
-            if self.current_merged_lora_id is not None and \
-               self.current_merged_lora_id != merge_lora_id:
-                lora_id_to_unmerge = self.current_merged_lora_id
-                # logger.info(f"需要unmerge lora_id: {lora_id_to_unmerge}")
+        lora_backend = "valora"
+        if lora_backend == "valora":
+            # 统计running队列的lora id
+            running_lora_id_counts = {}
+            for req in self.running:
+                lora_req = getattr(req, "lora_request", None)
+                if lora_req is not None:
+                    lora_id = getattr(lora_req, "lora_int_id", None)
+                    if lora_id is not None:
+                        running_lora_id_counts[lora_id] = running_lora_id_counts.get(lora_id, 0) + 1
             
-            # 如果新的merge_lora_id还没有merge到模型，需要merge
-            if self.current_merged_lora_id != merge_lora_id:
-                lora_id_to_merge = merge_lora_id
-                # logger.info(f"需要merge lora_id: {lora_id_to_merge}")
-                # 更新当前merged的lora_id
-                self.current_merged_lora_id = merge_lora_id
-        elif self.merge_mode == "unmerge":
-            # 如果切换到unmerge模式，但当前有merge的lora，需要unmerge
-            if self.current_merged_lora_id is not None:
-                lora_id_to_unmerge = self.current_merged_lora_id
-                # logger.info(f"切换到unmerge模式，需要unmerge lora_id: {lora_id_to_unmerge}")
-                self.current_merged_lora_id = None
+            # 统计waiting队列的lora id
+            waiting_lora_id_counts = {}
+            for req in self.waiting:
+                lora_req = getattr(req, "lora_request", None)
+                if lora_req is not None:
+                    lora_id = getattr(lora_req, "lora_int_id", None)
+                    if lora_id is not None:
+                        waiting_lora_id_counts[lora_id] = waiting_lora_id_counts.get(lora_id, 0) + 1
+            
+            # 合并所有请求的lora id统计
+            all_lora_id_counts = {}
+            for lora_id, count in running_lora_id_counts.items():
+                all_lora_id_counts[lora_id] = all_lora_id_counts.get(lora_id, 0) + count
+            for lora_id, count in waiting_lora_id_counts.items():
+                all_lora_id_counts[lora_id] = all_lora_id_counts.get(lora_id, 0) + count
+            
+            # logger.info(f"lora_id_counts: {all_lora_id_counts}, current_merged_lora_id: {self.current_merged_lora_id}")
+            
+            # 判断是否应该进入merge模式
+            # 1. 如果所有请求的lora id相同且只有一个lora_id
+            # 2. 或者某个lora_id的请求数超过一半
+            if len(running_lora_id_counts) > 1:
+                self.merge_mode = "unmerge"
+            elif len(all_lora_id_counts) == 1:
+                # 只有一个lora_id，直接使用它
+                merge_lora_id = list(all_lora_id_counts.keys())[0]
+                self.merge_mode = "merge"
+                # logger.info(f"单一lora_id，进入merge模式: {merge_lora_id}")
+            elif len(all_lora_id_counts) > 1:
+                # 多个lora_id，检查是否有某个超过一半
+                total_reqs = sum(all_lora_id_counts.values())
+                for lora_id, count in all_lora_id_counts.items():
+                    if count > total_reqs / 2:
+                        merge_lora_id = lora_id
+                        self.merge_mode = "merge"
+                        # logger.info(f"lora_id {merge_lora_id} 请求数超过一半，进入merge模式")
+                        break
+                else:
+                    # 没有lora_id超过一半，使用unmerge模式
+                    self.merge_mode = "unmerge"
+            else:
+                # 没有请求（lora_id_counts为空）
+                # 如果当前已经merge了某个lora，保持merge模式，不切换到unmerge
+                if self.current_merged_lora_id is not None:
+                    self.merge_mode = "merge"
+                    merge_lora_id = self.current_merged_lora_id
+                    # logger.info(f"没有新请求，保持merge模式，当前merged lora_id: {merge_lora_id}")
+                else:
+                    self.merge_mode = "unmerge"
+            
+            # 处理merge模式下的lora权重管理
+            if self.merge_mode == "merge" and merge_lora_id is not None:
+                # 如果当前已经merge了其他lora，需要先unmerge
+                if self.current_merged_lora_id is not None and \
+                self.current_merged_lora_id != merge_lora_id:
+                    lora_id_to_unmerge = self.current_merged_lora_id
+                    # logger.info(f"需要unmerge lora_id: {lora_id_to_unmerge}")
+                
+                # 如果新的merge_lora_id还没有merge到模型，需要merge
+                if self.current_merged_lora_id != merge_lora_id:
+                    lora_id_to_merge = merge_lora_id
+                    # logger.info(f"需要merge lora_id: {lora_id_to_merge}")
+                    # 更新当前merged的lora_id
+                    self.current_merged_lora_id = merge_lora_id
+            elif self.merge_mode == "unmerge":
+                # 如果切换到unmerge模式，但当前有merge的lora，需要unmerge
+                if self.current_merged_lora_id is not None:
+                    lora_id_to_unmerge = self.current_merged_lora_id
+                    # logger.info(f"切换到unmerge模式，需要unmerge lora_id: {lora_id_to_unmerge}")
+                    self.current_merged_lora_id = None
                 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -415,32 +417,33 @@ class Scheduler(SchedulerInterface):
         # skipped and put back at the head of the waiting queue later
         skipped_waiting_requests = create_request_queue(self.policy)
 
-        # merge模式下, 优先调度merge_lora_id的请求
-        if not preempted_reqs and hasattr(self, 'merge_mode') and self.merge_mode == "merge":
-            # 只收集不在队列前面的匹配请求（避免重复移动已经在队列前面的匹配请求）
-            matching_reqs = []
-            seen_non_matching = False
-            for req in self.waiting:
-                lora_req = getattr(req, "lora_request", None)
-                if lora_req is not None:
-                    lora_id = getattr(lora_req, "lora_int_id", None)
-                    if lora_id == merge_lora_id:
-                        # 如果已经遇到过不匹配的请求，说明这个匹配请求不在队列前面，需要移动
-                        if seen_non_matching:
-                            matching_reqs.append(req)
+        if lora_backend == "valora":
+            # merge模式下, 优先调度merge_lora_id的请求
+            if not preempted_reqs and hasattr(self, 'merge_mode') and self.merge_mode == "merge":
+                # 只收集不在队列前面的匹配请求（避免重复移动已经在队列前面的匹配请求）
+                matching_reqs = []
+                seen_non_matching = False
+                for req in self.waiting:
+                    lora_req = getattr(req, "lora_request", None)
+                    if lora_req is not None:
+                        lora_id = getattr(lora_req, "lora_int_id", None)
+                        if lora_id == merge_lora_id:
+                            # 如果已经遇到过不匹配的请求，说明这个匹配请求不在队列前面，需要移动
+                            if seen_non_matching:
+                                matching_reqs.append(req)
+                        else:
+                            # 遇到不匹配的请求，标记一下（说明后面的匹配请求都需要移动）
+                            seen_non_matching = True
                     else:
-                        # 遇到不匹配的请求，标记一下（说明后面的匹配请求都需要移动）
+                        # 没有lora_request的请求，也视为不匹配
                         seen_non_matching = True
-                else:
-                    # 没有lora_request的请求，也视为不匹配
-                    seen_non_matching = True
-            
-            # 将需要移动的匹配请求移动到前面
-            if matching_reqs:
-                self.waiting.remove_requests(matching_reqs)
-                for req in reversed(matching_reqs):
-                    self.waiting.prepend_request(req)
-                logger.info(f"Prioritized {len(matching_reqs)} requests with lora_id={merge_lora_id}")
+                
+                # 将需要移动的匹配请求移动到前面
+                if matching_reqs:
+                    self.waiting.remove_requests(matching_reqs)
+                    for req in reversed(matching_reqs):
+                        self.waiting.prepend_request(req)
+                    logger.info(f"Prioritized {len(matching_reqs)} requests with lora_id={merge_lora_id}")
         
         # Next, schedule the WAITING requests.
         if not preempted_reqs:

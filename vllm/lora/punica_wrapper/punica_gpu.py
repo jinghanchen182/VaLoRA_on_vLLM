@@ -317,7 +317,7 @@ class AtmmWrapperGPU(PunicaWrapperBase):
         except ImportError:
             raise ImportError("Need to install atmm_ops to use AtmmWrapperGPU.")
         # 初始化内核参数默认值
-        self.tb_x, self.tb_y, self.tb_z, self.wp_x, self.wp_y = 32, 32, 32, 32, 32
+        self.tb_x, self.tb_y, self.tb_z, self.wp_x, self.wp_y = 64, 32, 32, 32, 32
 
     def update_metadata(self, mapping: LoRAMapping,
                         lora_index_to_id: list[Optional[int]], max_loras: int,
@@ -414,7 +414,7 @@ class AtmmWrapperGPU(PunicaWrapperBase):
             (self.tb_x, self.tb_y, self.tb_z, self.wp_x, self.wp_y) = self.shape_to_config[shape]
             # logger.info(f"111cjh shape_to_config[shape]: {self.shape_to_config[shape]}") 
         else:
-            self.tb_x, self.tb_y, self.tb_z, self.wp_x, self.wp_y = 32, 32, 32, 32, 32
+            self.tb_x, self.tb_y, self.tb_z, self.wp_x, self.wp_y = 64, 32, 32, 32, 32
         # t7 = time.time()
         # print(f"shape elapsed: {(t7-t6)*1000:.3f} ms")
         for slice_id in range(nslices):
@@ -506,7 +506,7 @@ class AtmmWrapperGPU(PunicaWrapperBase):
             (self.tb_x, self.tb_y, self.tb_z, self.wp_x, self.wp_y) = self.shape_to_config[shape]
             logger.info(f"111cjh shape_to_config[shape]: {self.shape_to_config[shape]}") 
         else:
-            self.tb_x, self.tb_y, self.tb_z, self.wp_x, self.wp_y = 32, 32, 32, 32, 32
+            self.tb_x, self.tb_y, self.tb_z, self.wp_x, self.wp_y = 64, 64, 32, 64, 64
         for slice_id in range(nslices):
             offset = 0
             slice = output_slices[slice_id]
