@@ -1606,13 +1606,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # compiled with full CUDA graphs, we have to skip them entirely.
         skip_cuda_graphs = self.full_cuda_graph and not attention_cuda_graphs
 
-        num_loras = self.lora_manager._adapter_manager.lora_slots
-        rank = 16
-        a_start = torch.arange(0, num_loras * rank, step=rank, device=self.device, dtype=torch.long)
-        a_len = torch.full((num_loras,), rank, device=self.device, dtype=torch.long)
-        a_loc = torch.arange(0, num_loras * rank, device=self.device, dtype=torch.long)
-        a_scaling = torch.full((num_loras,), 1.0, device=self.device, dtype=self.model_config.dtype)
-        
+        if hasattr(self, 'lora_manager') and self.lora_manager is not None:
+            num_loras = self.lora_manager._adapter_manager.lora_slots
+            rank = 16
+            a_start = torch.arange(0, num_loras * rank, step=rank, device=self.device, dtype=torch.long)
+            a_len = torch.full((num_loras,), rank, device=self.device, dtype=torch.long)
+            a_loc = torch.arange(0, num_loras * rank, device=self.device, dtype=torch.long)
+            a_scaling = torch.full((num_loras,), 1.0, device=self.device, dtype=self.model_config.dtype)
+        else:
+            a_start = None
+            a_len = None
+            a_loc = None
+            a_scaling = None
         # 如果有已merge的lora，将a_scaling设置为None，避免重复计算
         if self.merged_lora_id is not None:
             # logger.info(f"Set a_scaling to None")
@@ -2343,12 +2348,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                     num_tokens, None, False)
 
-            num_loras = self.lora_manager._adapter_manager.lora_slots
-            rank = 16
-            a_start = torch.arange(0, num_loras * rank, step=rank, device=self.device, dtype=torch.long)
-            a_len = torch.full((num_loras,), rank, device=self.device, dtype=torch.long)
-            a_loc = torch.arange(0, num_loras * rank, device=self.device, dtype=torch.long)
-            a_scaling = torch.full((num_loras,), 1.0, device=self.device, dtype=self.model_config.dtype)
+            if hasattr(self, 'lora_manager') and self.lora_manager is not None:
+                num_loras = self.lora_manager._adapter_manager.lora_slots
+                rank = 16
+                a_start = torch.arange(0, num_loras * rank, step=rank, device=self.device, dtype=torch.long)
+                a_len = torch.full((num_loras,), rank, device=self.device, dtype=torch.long)
+                a_loc = torch.arange(0, num_loras * rank, device=self.device, dtype=torch.long)
+                a_scaling = torch.full((num_loras,), 1.0, device=self.device, dtype=self.model_config.dtype)
+            else:
+                a_start = None
+                a_len = None
+                a_loc = None
+                a_scaling = None
             
             # 如果有已merge的lora，将a_scaling设置为None，避免重复计算
             if self.merged_lora_id is not None:
