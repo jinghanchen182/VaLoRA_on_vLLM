@@ -200,6 +200,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         
         # 跟踪已merge的lora_id，用于在前向传播时跳过其计算
         self.merged_lora_id: Optional[int] = None
+        self.lora_infer_mode: str = "unmerge"
+        self.mix_primary_lora_id: Optional[int] = None
 
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
@@ -421,19 +423,35 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         new/resumed/paused/finished request in the batch.
         """
         # 处理LoRA merge/unmerge操作
+        self.lora_infer_mode = getattr(scheduler_output, "lora_infer_mode",
+                                       "unmerge")
+        self.mix_primary_lora_id = getattr(scheduler_output,
+                                           "mix_primary_lora_id", None)
         if hasattr(self, 'lora_manager') and self.lora_manager is not None:
             # 如果需要unmerge旧的lora
             if scheduler_output.lora_id_to_unmerge is not None:
                 lora_id = scheduler_output.lora_id_to_unmerge
-                logger.info(f"Worker: unmerge lora_id {lora_id} from model weights")
+                torch.cuda.synchronize()
+                _t0 = time.perf_counter()
                 self.lora_manager._adapter_manager.unmerge_lora(lora_id)
+                torch.cuda.synchronize()
+                _t1 = time.perf_counter()
+                logger.info(
+                    "[PROFILE] unmerge_lora(%s) took %.4f ms",
+                    lora_id, (_t1 - _t0) * 1000)
                 self.merged_lora_id = None
-            
+
             # 如果需要merge新的lora
             if scheduler_output.lora_id_to_merge is not None:
                 lora_id = scheduler_output.lora_id_to_merge
-                logger.info(f"Worker: merge lora_id {lora_id} into model weights")
+                torch.cuda.synchronize()
+                _t0 = time.perf_counter()
                 self.lora_manager._adapter_manager.merge_lora(lora_id)
+                torch.cuda.synchronize()
+                _t1 = time.perf_counter()
+                logger.info(
+                    "[PROFILE] merge_lora(%s) took %.4f ms",
+                    lora_id, (_t1 - _t0) * 1000)
                 # 保存已merge的lora_id，后续在_prepare_inputs中使用
                 self.merged_lora_id = lora_id            
         
@@ -638,6 +656,48 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self._may_reorder_batch(scheduler_output)
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
+
+    def _get_mix_primary_lora_index(self) -> Optional[int]:
+        if self.mix_primary_lora_id is None:
+            return None
+        if not hasattr(self, "lora_manager") or self.lora_manager is None:
+            return None
+        lora_index_to_id = self.lora_manager._adapter_manager.lora_index_to_id
+        for lora_index, lora_id in enumerate(lora_index_to_id):
+            if lora_id == self.mix_primary_lora_id:
+                return lora_index
+        return None
+
+    def _build_lora_scaling_tensors(
+        self,
+        num_loras: int,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        if not hasattr(self, "lora_manager") or self.lora_manager is None:
+            return None, None
+
+        a_scaling = torch.full((num_loras, ),
+                               1.0,
+                               device=self.device,
+                               dtype=self.model_config.dtype)
+        delora_scaling: Optional[torch.Tensor] = None
+
+        if self.lora_infer_mode == "merge":
+            a_scaling = None
+        elif self.lora_infer_mode == "mix":
+            mix_primary_lora_index = self._get_mix_primary_lora_index()
+            if mix_primary_lora_index is not None:
+                delora_scaling = torch.full((num_loras, ),
+                                            0.0,
+                                            device=self.device,
+                                            dtype=self.model_config.dtype)
+                delora_scaling[mix_primary_lora_index] = -1.0
+            else:
+                a_scaling = None
+        else:
+            if self.merged_lora_id is not None:
+                a_scaling = None
+
+        return a_scaling, delora_scaling
 
     def _extract_mm_kwargs(
         self,
@@ -1612,16 +1672,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             a_start = torch.arange(0, num_loras * rank, step=rank, device=self.device, dtype=torch.long)
             a_len = torch.full((num_loras,), rank, device=self.device, dtype=torch.long)
             a_loc = torch.arange(0, num_loras * rank, device=self.device, dtype=torch.long)
-            a_scaling = torch.full((num_loras,), 1.0, device=self.device, dtype=self.model_config.dtype)
+            a_scaling, delora_scaling = self._build_lora_scaling_tensors(num_loras)
         else:
             a_start = None
             a_len = None
             a_loc = None
             a_scaling = None
-        # 如果有已merge的lora，将a_scaling设置为None，避免重复计算
-        if self.merged_lora_id is not None:
-            # logger.info(f"Set a_scaling to None")
-            a_scaling = None
+            delora_scaling = None
         
         N0 = 32 * 4096
         tmp_d = torch.zeros(N0 * 60, dtype=torch.int8, device=self.device)
@@ -1636,7 +1693,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 skip_cuda_graphs=skip_cuda_graphs,
         ), self.maybe_get_kv_connector_output(
                 scheduler_output) as kv_connector_output:
-
+            model_kwargs_with_delora = dict(model_kwargs)
+            if delora_scaling is not None:
+                model_kwargs_with_delora["delora_scaling"] = delora_scaling
             model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -1648,7 +1707,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 a_scaling=a_scaling,
                 tmp_d=tmp_d,
                 # rank_counts=rank_counts,
-                **model_kwargs,
+                **model_kwargs_with_delora,
             )
 
         if self.use_aux_hidden_state_outputs:
@@ -1679,8 +1738,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                   num_scheduled_tokens_np, kv_connector_output)
 
             sample_hidden_states = hidden_states[logits_indices]
+            compute_logits_kwargs = dict(a_start=a_start,
+                                         a_len=a_len,
+                                         a_loc=a_loc,
+                                         a_scaling=a_scaling,
+                                         tmp_d=tmp_d)
+            if delora_scaling is not None:
+                compute_logits_kwargs["delora_scaling"] = delora_scaling
             logits = self.model.compute_logits(sample_hidden_states, None,
-                a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
+                                               **compute_logits_kwargs)
         if broadcast_pp_output:
             model_output_broadcast_data = {
                 "logits": logits.contiguous(),
@@ -2354,17 +2420,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 a_start = torch.arange(0, num_loras * rank, step=rank, device=self.device, dtype=torch.long)
                 a_len = torch.full((num_loras,), rank, device=self.device, dtype=torch.long)
                 a_loc = torch.arange(0, num_loras * rank, device=self.device, dtype=torch.long)
-                a_scaling = torch.full((num_loras,), 1.0, device=self.device, dtype=self.model_config.dtype)
+                a_scaling, delora_scaling = self._build_lora_scaling_tensors(num_loras)
             else:
                 a_start = None
                 a_len = None
                 a_loc = None
                 a_scaling = None
-            
-            # 如果有已merge的lora，将a_scaling设置为None，避免重复计算
-            if self.merged_lora_id is not None:
-                logger.info(f"Set a_scaling to None")
-                a_scaling = None
+                delora_scaling = None
             
             N0 = 32 * 4096
             tmp_d = torch.zeros(N0 * 60, dtype=torch.int8, device=self.device)
@@ -2374,6 +2436,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.vllm_config,
                     num_tokens=num_tokens,
                     num_tokens_across_dp=num_tokens_across_dp):
+                model_kwargs_with_delora = dict(model_kwargs)
+                if delora_scaling is not None:
+                    model_kwargs_with_delora["delora_scaling"] = delora_scaling
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -2385,7 +2450,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     a_scaling=a_scaling,
                     tmp_d=tmp_d,
                     # rank_counts=rank_counts,
-                    **model_kwargs,
+                    **model_kwargs_with_delora,
                 )
 
             if self.use_aux_hidden_state_outputs:
@@ -2425,18 +2490,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         a_start = torch.arange(0, num_loras * rank, step=rank, device=self.device, dtype=torch.long)
         a_len = torch.full((num_loras,), rank, device=self.device, dtype=torch.long)
         a_loc = torch.arange(0, num_loras * rank, device=self.device, dtype=torch.long)
-        a_scaling = torch.full((num_loras,), 1.0, device=self.device, dtype=self.model_config.dtype)
-        
-        # 如果有已merge的lora，将a_scaling设置为None，避免重复计算
-        if self.merged_lora_id is not None:
-            logger.info(f"Set a_scaling to None")
-            a_scaling = None
+        a_scaling, delora_scaling = self._build_lora_scaling_tensors(num_loras)
         
         N0 = 32 * 4096
         tmp_d = torch.zeros(N0 * 60, dtype=torch.int8, device=self.device)
-
-        logits = self.model.compute_logits(hidden_states, None, 
-                                        a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
+        compute_logits_kwargs = dict(a_start=a_start,
+                                     a_len=a_len,
+                                     a_loc=a_loc,
+                                     a_scaling=a_scaling,
+                                     tmp_d=tmp_d)
+        if delora_scaling is not None:
+            compute_logits_kwargs["delora_scaling"] = delora_scaling
+        logits = self.model.compute_logits(hidden_states, None,
+                                           **compute_logits_kwargs)
         num_reqs = logits.size(0)
 
         dummy_tensors = lambda v: torch.full(

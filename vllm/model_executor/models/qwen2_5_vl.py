@@ -1053,8 +1053,14 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids, 
+                        a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
         if multimodal_embeddings is not None \
             and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
@@ -1067,8 +1073,14 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         input_ids: torch.Tensor,
         image_input: Optional[Qwen2_5_VLImageInputs] = None,
         video_input: Optional[Qwen2_5_VLVideoInputs] = None,
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.get_input_embeddings(input_ids)
+        inputs_embeds = self.get_input_embeddings(input_ids, 
+                        a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
         if image_input is not None:
             image_embeds = self._process_image_input(image_input)
             inputs_embeds = merge_multimodal_embeddings(
@@ -1094,6 +1106,11 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for Qwen2.5-VL.
@@ -1139,7 +1156,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 inputs_embeds = self.get_input_embeddings_v0(
                     input_ids,
                     image_input=image_input,
-                    video_input=video_input)
+                    video_input=video_input,
+                    a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
                 input_ids = None
 
         hidden_states = self.language_model.model(
@@ -1147,6 +1165,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
+            a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d
         )
         return hidden_states
 
@@ -1154,9 +1173,19 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+                                                  sampling_metadata,
+                                                  a_start=a_start,
+                                                  a_len=a_len,
+                                                  a_loc=a_loc,
+                                                  a_scaling=a_scaling,
+                                                  tmp_d=tmp_d)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

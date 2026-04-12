@@ -20,6 +20,7 @@ if HAS_TRITON:
                                           lora_shrink)
 
 from .punica_base import PunicaWrapperBase
+from .utils import compute_meta
 
 from vllm.logger import init_logger
 logger = init_logger(__name__)
@@ -64,6 +65,70 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         # Prepare cuda kernel metadata tensors
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
+
+    def _make_delora_indices(self, token_lora_indices: torch.Tensor,
+                             primary_lora_index: int) -> torch.Tensor:
+        delora_indices = token_lora_indices.clone()
+        valid_lora_mask = delora_indices >= 0
+        primary_mask = delora_indices == primary_lora_index
+        delora_indices[valid_lora_mask & (~primary_mask)] = primary_lora_index
+        delora_indices[primary_mask] = -1
+        return delora_indices
+
+    def _swap_delora_metadata(
+        self,
+        delora_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int,
+               int, bool]:
+        token_len = delora_indices.size(0)
+        token_backup = self._token_lora_indices[:token_len].clone()
+        seq_start_backup = self._seq_start_locs[:self.batch_size].clone()
+        seq_lengths_backup = self._seq_lengths[:self.batch_size].clone()
+        lora_indices_backup = self._lora_indices_per_batch[:self.batch_size
+                                                           ].clone()
+        batch_size_backup = self.batch_size
+        max_length_backup = self.max_length
+        token_nums_backup = self.token_nums
+        no_lora_backup = self.no_lora
+
+        self._token_lora_indices[:token_len].copy_(delora_indices)
+        (b_seq_start_tensor, seq_length_tensor, lora_indices_tensor, batch_size,
+         max_length, token_nums, no_lora) = compute_meta(delora_indices)
+        self._seq_start_locs[:b_seq_start_tensor.shape[0]].copy_(
+            b_seq_start_tensor)
+        self._seq_lengths[:seq_length_tensor.shape[0]].copy_(seq_length_tensor)
+        self._lora_indices_per_batch[:lora_indices_tensor.shape[0]].copy_(
+            lora_indices_tensor)
+        self.batch_size = batch_size
+        self.max_length = max_length
+        self.token_nums = token_nums
+        self.no_lora = no_lora
+
+        return (token_backup, seq_start_backup, seq_lengths_backup,
+                lora_indices_backup, batch_size_backup, max_length_backup,
+                token_nums_backup, no_lora_backup)
+
+    def _restore_delora_metadata(
+        self,
+        token_backup: torch.Tensor,
+        seq_start_backup: torch.Tensor,
+        seq_lengths_backup: torch.Tensor,
+        lora_indices_backup: torch.Tensor,
+        batch_size_backup: int,
+        max_length_backup: int,
+        token_nums_backup: int,
+        no_lora_backup: bool,
+    ) -> None:
+        token_len = token_backup.size(0)
+        self._token_lora_indices[:token_len].copy_(token_backup)
+        self._seq_start_locs[:seq_start_backup.shape[0]].copy_(seq_start_backup)
+        self._seq_lengths[:seq_lengths_backup.shape[0]].copy_(seq_lengths_backup)
+        self._lora_indices_per_batch[:lora_indices_backup.shape[0]].copy_(
+            lora_indices_backup)
+        self.batch_size = batch_size_backup
+        self.max_length = max_length_backup
+        self.token_nums = token_nums_backup
+        self.no_lora = no_lora_backup
 
     def add_shrink(self, y: torch.Tensor, x: torch.Tensor,
                    lora_a_stacked: tuple[torch.Tensor,
@@ -332,6 +397,72 @@ class AtmmWrapperGPU(PunicaWrapperBase):
         # Prepare cuda kernel metadata tensors
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
+
+    def _make_delora_indices(self, token_lora_indices: torch.Tensor,
+                             primary_lora_index: int) -> torch.Tensor:
+        delora_indices = token_lora_indices.clone()
+        valid_lora_mask = delora_indices >= 0
+        primary_mask = delora_indices == primary_lora_index
+        # 把其他 LoRA折叠到主 LoRA，把主 LoRA 本身反向置空
+        delora_indices[valid_lora_mask & (~primary_mask)] = primary_lora_index
+        delora_indices[primary_mask] = -1
+        return delora_indices
+
+    def _swap_delora_metadata(
+        self,
+        delora_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int,
+               int, bool]:
+        # 把对象当前维护的 LoRA 元数据临时替换为 DeLoRA 对应元数据
+        token_len = delora_indices.size(0)
+        token_backup = self._token_lora_indices[:token_len].clone()
+        seq_start_backup = self._seq_start_locs[:self.batch_size].clone()
+        seq_lengths_backup = self._seq_lengths[:self.batch_size].clone()
+        lora_indices_backup = self._lora_indices_per_batch[:self.batch_size
+                                                           ].clone()
+        batch_size_backup = self.batch_size
+        max_length_backup = self.max_length
+        token_nums_backup = self.token_nums
+        no_lora_backup = self.no_lora
+
+        self._token_lora_indices[:token_len].copy_(delora_indices)
+        (b_seq_start_tensor, seq_length_tensor, lora_indices_tensor, batch_size,
+         max_length, token_nums, no_lora) = compute_meta(delora_indices)
+        self._seq_start_locs[:b_seq_start_tensor.shape[0]].copy_(
+            b_seq_start_tensor)
+        self._seq_lengths[:seq_length_tensor.shape[0]].copy_(seq_length_tensor)
+        self._lora_indices_per_batch[:lora_indices_tensor.shape[0]].copy_(
+            lora_indices_tensor)
+        self.batch_size = batch_size
+        self.max_length = max_length
+        self.token_nums = token_nums
+        self.no_lora = no_lora
+
+        return (token_backup, seq_start_backup, seq_lengths_backup,
+                lora_indices_backup, batch_size_backup, max_length_backup,
+                token_nums_backup, no_lora_backup)
+
+    def _restore_delora_metadata(
+        self,
+        token_backup: torch.Tensor,
+        seq_start_backup: torch.Tensor,
+        seq_lengths_backup: torch.Tensor,
+        lora_indices_backup: torch.Tensor,
+        batch_size_backup: int,
+        max_length_backup: int,
+        token_nums_backup: int,
+        no_lora_backup: bool,
+    ) -> None:
+        token_len = token_backup.size(0)
+        self._token_lora_indices[:token_len].copy_(token_backup)
+        self._seq_start_locs[:seq_start_backup.shape[0]].copy_(seq_start_backup)
+        self._seq_lengths[:seq_lengths_backup.shape[0]].copy_(seq_lengths_backup)
+        self._lora_indices_per_batch[:lora_indices_backup.shape[0]].copy_(
+            lora_indices_backup)
+        self.batch_size = batch_size_backup
+        self.max_length = max_length_backup
+        self.token_nums = token_nums_backup
+        self.no_lora = no_lora_backup
     
     def add_shrink(self, y: torch.Tensor, x: torch.Tensor,
                    lora_a_stacked: tuple[torch.Tensor,
@@ -570,6 +701,7 @@ class AtmmWrapperGPU(PunicaWrapperBase):
                         a_len: Optional[torch.Tensor] = None,
                         a_loc: Optional[torch.Tensor] = None,
                         a_scaling: Optional[torch.Tensor] = None,
+                        delora_scaling: Optional[torch.Tensor] = None,
                         tmp_d: Optional[torch.Tensor] = None,
                         # rank_counts: Optional[torch.Tensor] = None,
                         *,
@@ -636,6 +768,46 @@ class AtmmWrapperGPU(PunicaWrapperBase):
                 a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d,
                 add_inputs=True,
                 **kwargs)
+        if delora_scaling is not None:
+            primary_lora_index = int(torch.argmin(delora_scaling).item())
+            token_lora_indices = torch.narrow(self._token_lora_indices, 0, 0,
+                                              x.size(0))
+            delora_indices = self._make_delora_indices(token_lora_indices,
+                                                       primary_lora_index)
+            (token_backup, seq_start_backup, seq_lengths_backup,
+             lora_indices_backup, batch_size_backup, max_length_backup,
+             token_nums_backup, no_lora_backup) = self._swap_delora_metadata(
+                 delora_indices)
+            try:
+                self.add_shrink(
+                    buffer,  # type: ignore
+                    x,
+                    lora_a_stacked,
+                    scale,
+                    a_start=a_start,
+                    a_len=a_len,
+                    a_loc=a_loc,
+                    a_scaling=delora_scaling,
+                    tmp_d=tmp_d,
+                    **kwargs)
+                self.add_expand(
+                    y,
+                    buffer,  # type: ignore
+                    lora_b_stacked,
+                    None,
+                    output_slices,
+                    a_start=a_start,
+                    a_len=a_len,
+                    a_loc=a_loc,
+                    a_scaling=delora_scaling,
+                    tmp_d=tmp_d,
+                    add_inputs=True,
+                    **kwargs)
+            finally:
+                self._restore_delora_metadata(
+                    token_backup, seq_start_backup, seq_lengths_backup,
+                    lora_indices_backup, batch_size_backup, max_length_backup,
+                    token_nums_backup, no_lora_backup)
         # else:
         #     logger.info("a_scaling is None")
 
@@ -649,6 +821,7 @@ class AtmmWrapperGPU(PunicaWrapperBase):
                         a_len: Optional[torch.Tensor] = None,
                         a_loc: Optional[torch.Tensor] = None,
                         a_scaling: Optional[torch.Tensor] = None,
+                        delora_scaling: Optional[torch.Tensor] = None,
                         tmp_d: Optional[torch.Tensor] = None,
                         *,
                         buffer: Optional[torch.Tensor] = None,
@@ -700,4 +873,44 @@ class AtmmWrapperGPU(PunicaWrapperBase):
                 add_inputs=True,
                 **kwargs
             )  
+        if delora_scaling is not None:
+            primary_lora_index = int(torch.argmin(delora_scaling).item())
+            token_lora_indices = torch.narrow(self._token_lora_indices, 0, 0,
+                                              x.size(0))
+            delora_indices = self._make_delora_indices(token_lora_indices,
+                                                       primary_lora_index)
+            (token_backup, seq_start_backup, seq_lengths_backup,
+             lora_indices_backup, batch_size_backup, max_length_backup,
+             token_nums_backup, no_lora_backup) = self._swap_delora_metadata(
+                 delora_indices)
+            try:
+                self.add_shrink(
+                    buffer.unsqueeze(dim=0),
+                    x,
+                    [lora_a_stacked],
+                    scale,
+                    a_start=a_start,
+                    a_len=a_len,
+                    a_loc=a_loc,
+                    a_scaling=delora_scaling,
+                    tmp_d=tmp_d,
+                    **kwargs)
+                self.add_expand(
+                    y,
+                    buffer.unsqueeze(dim=0).half(),
+                    [lora_b_stacked],
+                    None,
+                    (y.shape[-1],),
+                    a_start=a_start,
+                    a_len=a_len,
+                    a_loc=a_loc,
+                    a_scaling=delora_scaling,
+                    tmp_d=tmp_d,
+                    add_inputs=True,
+                    **kwargs)
+            finally:
+                self._restore_delora_metadata(
+                    token_backup, seq_start_backup, seq_lengths_backup,
+                    lora_indices_backup, batch_size_backup, max_length_backup,
+                    token_nums_backup, no_lora_backup)
         y = y.view_as(y_org)

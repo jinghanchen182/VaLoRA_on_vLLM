@@ -243,6 +243,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 a_len: Optional[torch.Tensor] = None,
                 a_loc: Optional[torch.Tensor] = None,
                 a_scaling: Optional[torch.Tensor] = None,
+                delora_scaling: Optional[torch.Tensor] = None,
                 tmp_d: Optional[torch.Tensor] = None) -> torch.Tensor:
         added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1,
                                         1, 0)
@@ -281,6 +282,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 a_len=a_len,
                 a_loc=a_loc,
                 a_scaling=a_scaling,
+                delora_scaling=delora_scaling,
                 tmp_d=tmp_d)
 
         if not current_platform.can_update_inplace():
@@ -429,6 +431,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
               a_len: Optional[torch.Tensor] = None,
               a_loc: Optional[torch.Tensor] = None,
               a_scaling: Optional[torch.Tensor] = None,
+              delora_scaling: Optional[torch.Tensor] = None,
               tmp_d: Optional[torch.Tensor] = None,
               # rank_counts: Optional[torch.Tensor] = None,
             ) -> torch.Tensor:
@@ -448,7 +451,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         lora_output: Optional[
             torch.Tensor] = self.punica_wrapper.add_lora_linear(
                 output, x, self.lora_a_stacked, self.lora_b_stacked,
-                self.lora_bias_stacked, 1.0, self.output_slices, a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
+                self.lora_bias_stacked, 1.0, self.output_slices, a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, delora_scaling=delora_scaling, tmp_d=tmp_d)
         if not current_platform.can_update_inplace():
             output = lora_output
 
@@ -493,7 +496,13 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         self.n_slices = 1
 
     def forward(
-        self, input_: torch.Tensor
+        self,
+        input_: torch.Tensor,
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
         """Forward of ReplicatedLinearWithLoRA
 
@@ -508,7 +517,13 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
                 if not self.base_layer.skip_bias_add else None)
 
         # Matrix multiply.
-        output = self.apply(input_, bias)
+        output = self.apply(input_,
+                            bias,
+                            a_start=a_start,
+                            a_len=a_len,
+                            a_loc=a_loc,
+                            a_scaling=a_scaling,
+                            tmp_d=tmp_d)
 
         output_bias = (self.base_layer.bias
                        if self.base_layer.skip_bias_add else None)
@@ -595,6 +610,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         a_len: Optional[torch.Tensor] = None,
         a_loc: Optional[torch.Tensor] = None,
         a_scaling: Optional[torch.Tensor] = None,
+        delora_scaling: Optional[torch.Tensor] = None,
         tmp_d: Optional[torch.Tensor] = None,
         # rank_counts: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
@@ -612,7 +628,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
         # Matrix multiply.
         # logger.info("ColumnParallelLinearWithLoRA")
-        output_parallel = self.apply(input_, bias, a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
+        output_parallel = self.apply(input_, bias, a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, delora_scaling=delora_scaling, tmp_d=tmp_d)
         if self.base_layer.gather_output:
             # All-gather across the partitions.
             output = tensor_model_parallel_all_gather(output_parallel)
@@ -952,6 +968,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         a_len: Optional[torch.Tensor] = None,
         a_loc: Optional[torch.Tensor] = None,
         a_scaling: Optional[torch.Tensor] = None,
+        delora_scaling: Optional[torch.Tensor] = None,
         tmp_d: Optional[torch.Tensor] = None,
         # rank_counts: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
@@ -977,7 +994,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
         # Matrix multiply.
         # logger.info("RowParallelLinearWithLoRA")
-        output_parallel = self.apply(input_parallel, a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
+        output_parallel = self.apply(input_parallel, a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, delora_scaling=delora_scaling, tmp_d=tmp_d)
         if self.base_layer.reduce_results and self.base_layer.tp_size > 1:
             output_ = tensor_model_parallel_all_reduce(output_parallel)
         else:
@@ -1150,6 +1167,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         a_len: Optional[torch.Tensor] = None,
         a_loc: Optional[torch.Tensor] = None,
         a_scaling: Optional[torch.Tensor] = None,
+        delora_scaling: Optional[torch.Tensor] = None,
         tmp_d: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
@@ -1218,7 +1236,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             torch.Tensor] = self.punica_wrapper.add_lora_logits(
                 logits, hidden_states, self.lora_a_stacked,
                 self.lora_b_stacked, 1.0, 
-                a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
+                a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, delora_scaling=delora_scaling, tmp_d=tmp_d)
 
         if not current_platform.can_update_inplace():
             logits = lora_output

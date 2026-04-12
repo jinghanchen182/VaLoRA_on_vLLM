@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 import time
 from collections import defaultdict
 from collections.abc import Iterable
@@ -165,6 +166,20 @@ class Scheduler(SchedulerInterface):
         # 当前已经merge到模型权重中的lora_id, None表示没有merge任何lora
         self.current_merged_lora_id: Optional[int] = None
 
+        # 额外调试字段：step 计数 & merge/unmerge 切换时间
+        self.schedule_step_idx: int = 0
+        self.merge_mode: str = "unmerge"
+        self.last_merge_switch_ts: Optional[float] = None
+        self.last_merge_switch_step: Optional[int] = None
+        # TOS starvation tolerance threshold (seconds).
+        self.tos_theta: float = 30.0
+        # LOS scheduling hyper-parameters.
+        self.los_alpha: float = 1.0
+        self.los_beta: float = 0.1
+        self.los_gamma: float = 0.5
+        self.los_epsilon: float = 1.0
+        self.los_phi_cache: float = 0.8
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -176,6 +191,8 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
+
+        self.schedule_step_idx += 1
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -205,9 +222,18 @@ class Scheduler(SchedulerInterface):
         merge_lora_id = None
         lora_id_to_unmerge = None
         lora_id_to_merge = None
-        
-        lora_backend = "valora"
-        if lora_backend == "valora":
+        tos_starve_req_ids: set[str] = set()
+        tos_dom_lora_id: Optional[int] = None
+        tos_t_starve = 0
+        tos_t_dom = 0
+        los_score_by_req_id: dict[str, float] = {}
+
+        # Select LoRA scheduling backend via environment variable.
+        # Options: "baseline" (pure Punica), "simple", "TOS", "LOS"
+        lora_backend = os.environ.get("VLLM_LORA_BACKEND", "baseline")
+        if lora_backend == "simple":
+            old_merge_mode = getattr(self, "merge_mode", "unmerge")
+
             # 统计running队列的lora id
             running_lora_id_counts = {}
             for req in self.running:
@@ -233,40 +259,48 @@ class Scheduler(SchedulerInterface):
             for lora_id, count in waiting_lora_id_counts.items():
                 all_lora_id_counts[lora_id] = all_lora_id_counts.get(lora_id, 0) + count
             
-            # logger.info(f"lora_id_counts: {all_lora_id_counts}, current_merged_lora_id: {self.current_merged_lora_id}")
-            
+            # logger.info(f"[TEST] Valora Scheduling Step Start")
+            # 调试：观测 waiting 队列中 L1/L2 分布，便于判断是否存在 有 L2 但当前在处理 L1 chunk
+            if all_lora_id_counts:
+                logger.info(
+                    "[TEST] step=%d queue_lora_dist: "
+                    "running=%s, waiting=%s, all=%s, "
+                    "current_merged_lora_id=%s, merge_mode=%s",
+                    self.schedule_step_idx,
+                    running_lora_id_counts,
+                    waiting_lora_id_counts,
+                    all_lora_id_counts,
+                    self.current_merged_lora_id,
+                    getattr(self, "merge_mode", "unmerge"),
+                )
+
             # 判断是否应该进入merge模式
             # 1. 如果所有请求的lora id相同且只有一个lora_id
             # 2. 或者某个lora_id的请求数超过一半
-            if len(running_lora_id_counts) > 1:
+            if not all_lora_id_counts:
+                # 没有任何 LoRA 请求，保持现状或回退到 unmerge
+                self.merge_mode = "merge" if self.current_merged_lora_id is not None else "unmerge"
+                merge_lora_id = self.current_merged_lora_id
+            elif len(running_lora_id_counts) > 1:
                 self.merge_mode = "unmerge"
             elif len(all_lora_id_counts) == 1:
                 # 只有一个lora_id，直接使用它
                 merge_lora_id = list(all_lora_id_counts.keys())[0]
                 self.merge_mode = "merge"
-                # logger.info(f"单一lora_id，进入merge模式: {merge_lora_id}")
-            elif len(all_lora_id_counts) > 1:
+            else:
                 # 多个lora_id，检查是否有某个超过一半
                 total_reqs = sum(all_lora_id_counts.values())
+                dominant_lora = None
                 for lora_id, count in all_lora_id_counts.items():
                     if count > total_reqs / 2:
-                        merge_lora_id = lora_id
-                        self.merge_mode = "merge"
-                        # logger.info(f"lora_id {merge_lora_id} 请求数超过一半，进入merge模式")
+                        dominant_lora = lora_id
                         break
-                else:
-                    # 没有lora_id超过一半，使用unmerge模式
-                    self.merge_mode = "unmerge"
-            else:
-                # 没有请求（lora_id_counts为空）
-                # 如果当前已经merge了某个lora，保持merge模式，不切换到unmerge
-                if self.current_merged_lora_id is not None:
+                if dominant_lora is not None:
+                    merge_lora_id = dominant_lora
                     self.merge_mode = "merge"
-                    merge_lora_id = self.current_merged_lora_id
-                    # logger.info(f"没有新请求，保持merge模式，当前merged lora_id: {merge_lora_id}")
                 else:
                     self.merge_mode = "unmerge"
-            
+
             # 处理merge模式下的lora权重管理
             if self.merge_mode == "merge" and merge_lora_id is not None:
                 # 如果当前已经merge了其他lora，需要先unmerge
@@ -285,9 +319,188 @@ class Scheduler(SchedulerInterface):
                 # 如果切换到unmerge模式，但当前有merge的lora，需要unmerge
                 if self.current_merged_lora_id is not None:
                     lora_id_to_unmerge = self.current_merged_lora_id
-                    # logger.info(f"切换到unmerge模式，需要unmerge lora_id: {lora_id_to_unmerge}")
                     self.current_merged_lora_id = None
-                
+
+            # 如果本次 step 发生了模式切换，打 log 并记录切换时间
+            if self.merge_mode != old_merge_mode:
+                now_ts = scheduled_timestamp
+                delta = None
+                if self.last_merge_switch_ts is not None:
+                    delta = now_ts - self.last_merge_switch_ts
+                self.last_merge_switch_ts = now_ts
+                self.last_merge_switch_step = self.schedule_step_idx
+
+                logger.info(
+                    "[TEST] step=%d merge_mode_switch: %s -> %s, "
+                    "merge_lora_id=%s, last_switch_delta=%.6f",
+                    self.schedule_step_idx,
+                    old_merge_mode,
+                    self.merge_mode,
+                    merge_lora_id,
+                    float(delta) if delta is not None else -1.0,
+                )
+
+                if lora_id_to_unmerge is not None or lora_id_to_merge is not None:
+                    logger.info(
+                        "[TEST] step=%d merge_ops: to_unmerge=%s, to_merge=%s",
+                        self.schedule_step_idx,
+                        lora_id_to_unmerge,
+                        lora_id_to_merge,
+                    )
+        elif lora_backend  == "TOS":
+            old_merge_mode = getattr(self, "merge_mode", "unmerge")
+            max_t = max(1, self.max_num_scheduled_tokens)
+            now_wall_ts = time.time()
+
+            all_reqs = [*self.running, *list(self.waiting)]
+            lora_token_demands: dict[int, int] = defaultdict(int)
+
+            for req in all_reqs:
+                # Under chunked prefill, use remaining token demand as workload
+                # granularity instead of request counts.
+                if req.status == RequestStatus.RUNNING:
+                    token_demand = max(
+                        0,
+                        req.num_tokens_with_spec + req.num_output_placeholders -
+                        req.num_computed_tokens,
+                    )
+                else:
+                    token_demand = max(0, req.num_tokens -
+                                       req.num_computed_tokens)
+
+                lora_req = getattr(req, "lora_request", None)
+                req_lora_id = getattr(lora_req, "lora_int_id",
+                                      None) if lora_req else None
+                if req_lora_id is not None and token_demand > 0:
+                    lora_token_demands[req_lora_id] += token_demand
+
+                waiting_time = max(0.0, now_wall_ts - req.arrival_time)
+                # Approximate current-mode execution time using token demand
+                # normalized by MaxT, and add recent mode-switch latency.
+                exec_time_in_mode = token_demand / max_t
+                switch_latency = 0.0
+                if self.last_merge_switch_ts is not None:
+                    switch_latency = max(
+                        0.0, scheduled_timestamp - self.last_merge_switch_ts)
+                credit = waiting_time + exec_time_in_mode + switch_latency
+                if credit > self.tos_theta:
+                    tos_starve_req_ids.add(req.request_id)
+                    tos_t_starve += token_demand
+
+            if lora_token_demands:
+                tos_dom_lora_id, tos_t_dom = max(
+                    lora_token_demands.items(),
+                    key=lambda item: item[1],
+                )
+                merge_lora_id = tos_dom_lora_id
+
+            if (tos_t_starve / max_t <= 0.5) and (tos_t_dom / max_t > 0.5):
+                if tos_t_starve == 0 and tos_dom_lora_id is not None:
+                    self.merge_mode = "merge"
+                elif tos_dom_lora_id is not None:
+                    self.merge_mode = "mix"
+                else:
+                    self.merge_mode = "unmerge"
+            else:
+                self.merge_mode = "unmerge"
+
+            if self.merge_mode in ("merge", "mix") and merge_lora_id is not None:
+                if (self.current_merged_lora_id is not None
+                        and self.current_merged_lora_id != merge_lora_id):
+                    lora_id_to_unmerge = self.current_merged_lora_id
+
+                if self.current_merged_lora_id != merge_lora_id:
+                    lora_id_to_merge = merge_lora_id
+                    self.current_merged_lora_id = merge_lora_id
+            elif self.merge_mode == "unmerge":
+                if self.current_merged_lora_id is not None:
+                    lora_id_to_unmerge = self.current_merged_lora_id
+                    self.current_merged_lora_id = None
+
+            logger.info(
+                "[TEST][TOS] step=%d mode_decision: mode=%s, "
+                "t_starve=%d(%.3f), t_dom=%d(%.3f), max_t=%d, "
+                "starve_cnt=%d, dom_lora_id=%s",
+                self.schedule_step_idx,
+                self.merge_mode,
+                tos_t_starve,
+                tos_t_starve / max_t,
+                tos_t_dom,
+                tos_t_dom / max_t,
+                max_t,
+                len(tos_starve_req_ids),
+                tos_dom_lora_id,
+            )
+
+            if self.merge_mode != old_merge_mode:
+                now_ts = scheduled_timestamp
+                delta = None
+                if self.last_merge_switch_ts is not None:
+                    delta = now_ts - self.last_merge_switch_ts
+                self.last_merge_switch_ts = now_ts
+                self.last_merge_switch_step = self.schedule_step_idx
+
+                logger.info(
+                    "[TEST][TOS] step=%d merge_mode_switch: %s -> %s, "
+                    "dom_lora_id=%s, last_switch_delta=%.6f",
+                    self.schedule_step_idx,
+                    old_merge_mode,
+                    self.merge_mode,
+                    tos_dom_lora_id,
+                    float(delta) if delta is not None else -1.0,
+                )
+
+                if lora_id_to_unmerge is not None or lora_id_to_merge is not None:
+                    logger.info(
+                        "[TEST][TOS] step=%d merge_ops: to_unmerge=%s, "
+                        "to_merge=%s",
+                        self.schedule_step_idx,
+                        lora_id_to_unmerge,
+                        lora_id_to_merge,
+                    )
+        elif lora_backend == "LOS":
+            old_merge_mode = getattr(self, "merge_mode", "unmerge")
+            now_wall_ts = time.time()
+
+            if self.waiting:
+                los_ordered_waiting: list[Request] = []
+                while self.waiting:
+                    request = self.waiting.pop_request()
+                    l_prompt = max(1, request.num_prompt_tokens)
+                    l_hit = request.num_cached_tokens
+                    if l_hit < 0:
+                        _, num_new_local_computed_tokens = (
+                            self.kv_cache_manager.get_computed_blocks(request))
+                        l_hit = num_new_local_computed_tokens
+                    l_hit = min(max(0, l_hit), l_prompt)
+                    t_wait = max(0.0, now_wall_ts - request.arrival_time)
+                    lora_req = getattr(request, "lora_request", None)
+                    req_lora_id = getattr(lora_req, "lora_int_id",
+                                          None) if lora_req else None
+                    merged_bonus = 1.0 if (
+                        req_lora_id is not None
+                        and req_lora_id == self.current_merged_lora_id) else 0.0
+                    uncached_len = max(0.0,
+                                       float(l_prompt - l_hit) +
+                                       self.los_epsilon)
+                    score = (self.los_alpha * (1.0 / uncached_len) +
+                             self.los_beta * t_wait +
+                             self.los_gamma * merged_bonus)
+                    los_score_by_req_id[request.request_id] = score
+                    los_ordered_waiting.append(request)
+
+                los_ordered_waiting.sort(
+                    key=lambda req: los_score_by_req_id.get(req.request_id, 0.0),
+                    reverse=True,
+                )
+                for request in reversed(los_ordered_waiting):
+                    self.waiting.prepend_request(request)
+
+            # LOS decides mode after the batch is assembled.
+            self.merge_mode = old_merge_mode
+        else:
+            logger.info(f"[TEST] Punica Scheduling Step Start")
+        
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -405,6 +618,9 @@ class Scheduler(SchedulerInterface):
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
 
+            # logger.info(f"[TEST] Scheduling RUNNING Request {request.request_id}: num_new_tokens={num_new_tokens}, token_budget={token_budget}, encoder_budget={encoder_budget}")
+            # logger.info(f"[TEST] Process : {request.num_computed_tokens + num_new_tokens} / {request.num_tokens_with_spec}")
+
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
         if self.lora_config:
@@ -417,41 +633,55 @@ class Scheduler(SchedulerInterface):
         # skipped and put back at the head of the waiting queue later
         skipped_waiting_requests = create_request_queue(self.policy)
 
-        if lora_backend == "valora":
-            # merge模式下, 优先调度merge_lora_id的请求
-            if not preempted_reqs and hasattr(self, 'merge_mode') and self.merge_mode == "merge":
-                # 只收集不在队列前面的匹配请求（避免重复移动已经在队列前面的匹配请求）
-                matching_reqs = []
-                seen_non_matching = False
-                for req in self.waiting:
-                    lora_req = getattr(req, "lora_request", None)
-                    if lora_req is not None:
-                        lora_id = getattr(lora_req, "lora_int_id", None)
-                        if lora_id == merge_lora_id:
-                            # 如果已经遇到过不匹配的请求，说明这个匹配请求不在队列前面，需要移动
-                            if seen_non_matching:
-                                matching_reqs.append(req)
-                        else:
-                            # 遇到不匹配的请求，标记一下（说明后面的匹配请求都需要移动）
-                            seen_non_matching = True
-                    else:
-                        # 没有lora_request的请求，也视为不匹配
-                        seen_non_matching = True
-                
-                # 将需要移动的匹配请求移动到前面
-                if matching_reqs:
-                    self.waiting.remove_requests(matching_reqs)
-                    for req in reversed(matching_reqs):
-                        self.waiting.prepend_request(req)
-                    logger.info(f"Prioritized {len(matching_reqs)} requests with lora_id={merge_lora_id}")
         
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
+            if lora_backend == "TOS" and tos_starve_req_ids and self.waiting:
+                starving_waiting: list[Request] = []
+                non_starving_waiting: list[Request] = []
+                while self.waiting:
+                    waiting_req = self.waiting.pop_request()
+                    if waiting_req.request_id in tos_starve_req_ids:
+                        starving_waiting.append(waiting_req)
+                    else:
+                        non_starving_waiting.append(waiting_req)
+                for waiting_req in reversed(non_starving_waiting):
+                    self.waiting.prepend_request(waiting_req)
+                for waiting_req in reversed(starving_waiting):
+                    self.waiting.prepend_request(waiting_req)
+
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
                 request = self.waiting.peek_request()
+
+                # merge模式下, 跳过不匹配merge_lora_id的请求
+                if lora_backend == "simple" and self.merge_mode == "merge":
+                    lora_req = getattr(request, "lora_request", None)
+                    req_lora_id = getattr(lora_req, "lora_int_id", None) if lora_req else None
+
+                    if req_lora_id != merge_lora_id:
+                        # 跳过该请求
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
+                if lora_backend == "TOS":
+                    lora_req = getattr(request, "lora_request", None)
+                    req_lora_id = getattr(lora_req, "lora_int_id",
+                                          None) if lora_req else None
+                    if (self.merge_mode == "merge"
+                            and req_lora_id != tos_dom_lora_id):
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
+                    if self.merge_mode == "mix":
+                        is_starving = request.request_id in tos_starve_req_ids
+                        is_dominant = req_lora_id == tos_dom_lora_id
+                        if not (is_starving or is_dominant):
+                            self.waiting.pop_request()
+                            skipped_waiting_requests.prepend_request(request)
+                            continue
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -637,6 +867,99 @@ class Scheduler(SchedulerInterface):
         if skipped_waiting_requests:
             self.waiting.prepend_requests(skipped_waiting_requests)
 
+        if lora_backend == "LOS":
+            old_merge_mode = self.merge_mode
+            scheduled_batch_reqs = [
+                *scheduled_running_reqs,
+                *scheduled_new_reqs,
+                *scheduled_resumed_reqs,
+            ]
+            total_prompt_tokens = 0
+            total_hit_tokens = 0
+            los_lora_counts: dict[int, int] = defaultdict(int)
+
+            for req in scheduled_batch_reqs:
+                l_prompt = max(1, req.num_prompt_tokens)
+                l_hit = min(max(0, req.num_cached_tokens), l_prompt)
+                total_prompt_tokens += l_prompt
+                total_hit_tokens += l_hit
+                lora_req = getattr(req, "lora_request", None)
+                req_lora_id = getattr(lora_req, "lora_int_id",
+                                      None) if lora_req else None
+                if req_lora_id is not None:
+                    los_lora_counts[req_lora_id] += 1
+
+            ratio_hit = (
+                total_hit_tokens / total_prompt_tokens
+                if total_prompt_tokens > 0 else 0.0)
+            unique_lora_num = len(los_lora_counts)
+            los_dominant_lora_id: Optional[int] = None
+            if los_lora_counts:
+                los_dominant_lora_id = max(
+                    los_lora_counts.items(),
+                    key=lambda item: item[1],
+                )[0]
+
+            if unique_lora_num > 1 and ratio_hit > self.los_phi_cache:
+                self.merge_mode = "unmerge"
+                merge_lora_id = None
+            elif unique_lora_num == 1 and los_dominant_lora_id is not None:
+                self.merge_mode = "merge"
+                merge_lora_id = los_dominant_lora_id
+            elif unique_lora_num > 1 and los_dominant_lora_id is not None:
+                self.merge_mode = "mix"
+                merge_lora_id = los_dominant_lora_id
+
+            if self.merge_mode in ("merge", "mix") and merge_lora_id is not None:
+                if (self.current_merged_lora_id is not None
+                        and self.current_merged_lora_id != merge_lora_id):
+                    lora_id_to_unmerge = self.current_merged_lora_id
+                if self.current_merged_lora_id != merge_lora_id:
+                    lora_id_to_merge = merge_lora_id
+                    self.current_merged_lora_id = merge_lora_id
+            elif self.merge_mode == "unmerge":
+                if self.current_merged_lora_id is not None:
+                    lora_id_to_unmerge = self.current_merged_lora_id
+                    self.current_merged_lora_id = None
+                    merge_lora_id = None
+
+            logger.info(
+                "[TEST][LOS] step=%d mode_decision: mode=%s, "
+                "ratio_hit=%.3f, unique_loras=%d, dominant_lora_id=%s, "
+                "phi_cache=%.3f",
+                self.schedule_step_idx,
+                self.merge_mode,
+                ratio_hit,
+                unique_lora_num,
+                los_dominant_lora_id,
+                self.los_phi_cache,
+            )
+
+            if self.merge_mode != old_merge_mode:
+                delta = None
+                if self.last_merge_switch_ts is not None:
+                    delta = scheduled_timestamp - self.last_merge_switch_ts
+                self.last_merge_switch_ts = scheduled_timestamp
+                self.last_merge_switch_step = self.schedule_step_idx
+                logger.info(
+                    "[TEST][LOS] step=%d merge_mode_switch: %s -> %s, "
+                    "dominant_lora_id=%s, last_switch_delta=%.6f",
+                    self.schedule_step_idx,
+                    old_merge_mode,
+                    self.merge_mode,
+                    los_dominant_lora_id,
+                    float(delta) if delta is not None else -1.0,
+                )
+
+                if lora_id_to_unmerge is not None or lora_id_to_merge is not None:
+                    logger.info(
+                        "[TEST][LOS] step=%d merge_ops: to_unmerge=%s, "
+                        "to_merge=%s",
+                        self.schedule_step_idx,
+                        lora_id_to_unmerge,
+                        lora_id_to_merge,
+                    )
+
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
@@ -663,6 +986,29 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids,
             scheduled_spec_decode_tokens,
         )
+
+        if num_scheduled_tokens:
+            step_reqs_info = []
+            for req_id, n_tok in num_scheduled_tokens.items():
+                req = self.requests.get(req_id)
+                if req is None:
+                    continue
+                lora_req = getattr(req, "lora_request", None)
+                lora_id = getattr(lora_req, "lora_int_id", None) if lora_req else None
+                step_reqs_info.append(
+                    f"(req_id={req_id}, lora_id={lora_id}, tokens={n_tok})"
+                )
+
+            logger.info(
+                "[TEST] step=%d scheduled_reqs: %s, "
+                "merge_mode=%s, merged_lora_id=%s, total_tokens=%d",
+                self.schedule_step_idx,
+                "; ".join(step_reqs_info),
+                self.merge_mode,
+                self.current_merged_lora_id,
+                total_num_scheduled_tokens,
+            )
+
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
@@ -694,7 +1040,10 @@ class Scheduler(SchedulerInterface):
             grammar_bitmask=grammar_bitmask,
             # LoRA merge相关信息
             lora_id_to_unmerge=lora_id_to_unmerge,
-            lora_id_to_merge=lora_id_to_merge
+            lora_id_to_merge=lora_id_to_merge,
+            lora_infer_mode=self.merge_mode,
+            mix_primary_lora_id=(merge_lora_id
+                                 if self.merge_mode == "mix" else None),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1042,6 +1391,19 @@ class Scheduler(SchedulerInterface):
             # Return stats to only one of the front-ends.
             next(iter(engine_core_outputs.values())).scheduler_stats = (
                 self.make_stats(spec_decoding_stats))
+
+            # 调试：如果最近发生了 merge_mode 切换，记录从那次切换到本 batch 完成的耗时
+            if self.last_merge_switch_ts is not None and self.last_merge_switch_step is not None:
+                now_ts = time.monotonic()
+                logger.info(
+                    "[TEST] batch_done_after_switch: "
+                    "switch_step=%d, now_step_approx=%d, "
+                    "elapsed_since_switch=%.6f s, num_outputs_clients=%d",
+                    self.last_merge_switch_step,
+                    self.last_merge_switch_step + 1,  # 近似对应的下一个 step
+                    now_ts - self.last_merge_switch_ts,
+                    len(engine_core_outputs),
+                )
 
         return engine_core_outputs
 

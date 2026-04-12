@@ -109,9 +109,12 @@ void bgmv_kernel(T* __restrict__ Y, const T* __restrict__ X, const T* __restrict
 //    FOR_BGMV_PARAM_thy(f,T,narrow,wide,512)\
 
 #define FOR_BGMV_WIDE(f, T, narrow) \
+    FOR_BGMV_PARAM_thx(f,T,narrow, 512) \
+    FOR_BGMV_PARAM_thx(f,T,narrow, 3584) \
     FOR_BGMV_PARAM_thx(f,T,narrow, 4096) \
     FOR_BGMV_PARAM_thx(f,T,narrow, 6144) \
     FOR_BGMV_PARAM_thx(f,T,narrow, 11008) \
+    FOR_BGMV_PARAM_thx(f,T,narrow, 18944) \
     FOR_BGMV_PARAM_thx(f,T,narrow, 32256)
 //    FOR_BGMV_PARAM_thx(f,T,narrow, 1664) \
 //    FOR_BGMV_PARAM_thx(f,T,narrow, 2048)

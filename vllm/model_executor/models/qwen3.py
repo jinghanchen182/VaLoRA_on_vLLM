@@ -141,8 +141,13 @@ class Qwen3Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states, a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
@@ -155,7 +160,7 @@ class Qwen3Attention(nn.Module):
         k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
+        output, _ = self.o_proj(attn_output, a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
         return output
 
 
@@ -219,6 +224,11 @@ class Qwen3DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -230,12 +240,13 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
+            a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d
         )
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
         return hidden_states, residual
 
 
@@ -320,18 +331,36 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
+                                   inputs_embeds, a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
         return hidden_states
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(
+            self.lm_head, 
+            hidden_states, 
+            sampling_metadata,
+            a_start=a_start,
+            a_len=a_len,
+            a_loc=a_loc,
+            a_scaling=a_scaling,
+            tmp_d=tmp_d
+        )
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

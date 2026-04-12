@@ -161,3 +161,7 @@ class SchedulerOutput:
     lora_id_to_unmerge: Optional[int] = None
     # 需要加到模型权重中的lora_id (merge操作)
     lora_id_to_merge: Optional[int] = None
+    # LoRA 推理模式: "merge" / "unmerge" / "mix"
+    lora_infer_mode: str = "unmerge"
+    # mix 模式下已 merge 到基座的主 LoRA id
+    mix_primary_lora_id: Optional[int] = None

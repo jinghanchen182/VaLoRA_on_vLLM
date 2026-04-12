@@ -15,7 +15,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
-
+from vllm.logger import init_logger
+logger = init_logger(__name__)
 _logits_processor_threadpool: Optional[ThreadPoolExecutor] = None
 if envs.VLLM_LOGITS_PROCESSOR_THREADS is not None:
     _logits_processor_threadpool = ThreadPoolExecutor(
@@ -64,18 +65,21 @@ class LogitsProcessor(nn.Module):
         a_len: Optional[torch.Tensor] = None,
         a_loc: Optional[torch.Tensor] = None,
         a_scaling: Optional[torch.Tensor] = None,
+        delora_scaling: Optional[torch.Tensor] = None,
         tmp_d: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         if self.logits_as_input:
             logits = hidden_states
+            logger.info(f"logits_as_input is True")
         else:
             if sampling_metadata is not None and prune_hidden_states:
                 hidden_states = _prune_hidden_states(hidden_states,
                                                      sampling_metadata)
 
             # Get the logits for the next tokens.
+            logger.info(f"logits_as_input is False")
             logits = self._get_logits(hidden_states, lm_head, embedding_bias,
-                                      a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, tmp_d=tmp_d)
+                                      a_start=a_start, a_len=a_len, a_loc=a_loc, a_scaling=a_scaling, delora_scaling=delora_scaling, tmp_d=tmp_d)
         if logits is not None:
             if self.soft_cap is not None:
                 logits = logits / self.soft_cap
@@ -111,6 +115,12 @@ class LogitsProcessor(nn.Module):
         hidden_states: torch.Tensor,
         lm_head: VocabParallelEmbedding,
         embedding_bias: Optional[torch.Tensor],
+        a_start: Optional[torch.Tensor] = None,
+        a_len: Optional[torch.Tensor] = None,
+        a_loc: Optional[torch.Tensor] = None,
+        a_scaling: Optional[torch.Tensor] = None,
+        delora_scaling: Optional[torch.Tensor] = None,
+        tmp_d: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
         logits = lm_head.quant_method.apply(lm_head,
